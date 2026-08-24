@@ -143,6 +143,59 @@ def _format_engine_failure(engine: str, exc: BaseException) -> str:
     return f"Engine {engine} failed: {type(exc).__name__}"
 
 
+_ROW_Y_TOLERANCE_FLOOR = 4.0
+_ROW_Y_TOLERANCE_FACTOR = 0.6
+
+
+def _reading_order(words: list[EnsembleWord]) -> list[EnsembleWord]:
+    """Order words top-to-bottom, left-to-right by visual row.
+
+    A flat sort on each word's raw top-edge y (the previous behavior) is
+    not the same thing as reading order: two words that are visually on
+    the same row commonly differ by a few px of y (font baseline/descender
+    differences, OCR box noise, or simply different row heights across
+    table columns), and a naive ``(y, x)`` sort lets a word from a column
+    further right sort *before* one from a column further left whenever
+    its own box happens to start those few px higher — splicing unrelated
+    text from a neighboring column into ``merged_text`` between two words
+    that were actually adjacent. That corruption is invisible to anything
+    that reads geometry directly (``field_extractor.py`` re-derives its own
+    row grouping from bboxes and ignores this order entirely), but it
+    silently breaks every consumer that trusts ``merged_text``'s left-to-
+    right order — most importantly ``custom_redact.find_term_spans``
+    (used by both per-request custom terms and ``dictionary_scan_enabled``),
+    which is a literal, zero-fuzz substring search: one row's continuation
+    word landing a few slots away from where it belongs is enough to make
+    an otherwise character-for-character-correct match silently miss.
+
+    Clusters by vertical-center adjacency — the same idea as
+    ``field_extractor._group_rows``, duplicated here (rather than imported)
+    to keep this module dependency-free/pure per its module docstring.
+    Compares each word only to the immediately preceding one's center, not
+    a growing envelope, so a densely packed table (row height roughly equal
+    to the row-to-row gap) doesn't chain-merge every row into one.
+    """
+    if not words:
+        return []
+    ordered = sorted(words, key=lambda w: (w.bbox.y + w.bbox.h / 2, w.bbox.x))
+    rows: list[list[EnsembleWord]] = []
+    current = [ordered[0]]
+    last_mid = ordered[0].bbox.y + ordered[0].bbox.h / 2
+    for word in ordered[1:]:
+        mid = word.bbox.y + word.bbox.h / 2
+        tolerance = max(_ROW_Y_TOLERANCE_FLOOR, word.bbox.h * _ROW_Y_TOLERANCE_FACTOR)
+        if mid - last_mid <= tolerance:
+            current.append(word)
+        else:
+            current.sort(key=lambda w: w.bbox.x)
+            rows.append(current)
+            current = [word]
+        last_mid = mid
+    current.sort(key=lambda w: w.bbox.x)
+    rows.append(current)
+    return [word for row in rows for word in row]
+
+
 def align_word_boxes(
     engine_words: list[tuple[str, list[dict]]],
     iou_threshold: float = 0.5,
@@ -240,7 +293,7 @@ def align_word_boxes(
             )
         )
 
-    ensemble.sort(key=lambda word: (word.bbox.y, word.bbox.x))
+    ensemble = _reading_order(ensemble)
     logger.debug(
         "align_word_boxes: cluster_count=%s engines_available=%s",
         len(ensemble),
