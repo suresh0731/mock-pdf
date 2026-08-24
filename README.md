@@ -57,6 +57,28 @@ To fully vendor: after a clean install's first successful run, zip `%USERPROFILE
 | Custom mock values | One per line; `value=MOCK_LABEL` for audit tags |
 | Regenerate | Re-applies redactions using cached OCR (fast) |
 
+## Folder-watch ingestion (alongside UI upload)
+
+An optional extension to the UI upload: point `WATCH_ENABLED=true` (see
+`.env.local.example`) at an input directory and every file dropped into it
+gets redacted automatically — no browser needed, and **no second process**.
+Setting `WATCH_ENABLED=true` and starting the app normally
+(`.\scripts\dev.ps1`) is enough — the watcher runs as a background task
+*inside* that same `uvicorn`/FastAPI process (see `app/main.py`'s
+`lifespan`), alongside the NiceGUI UI and API on the same port.
+
+- Polls `WATCH_INPUT_DIR` (default `data/watch/input`) on an interval
+  (`WATCH_POLL_SECONDS`, default 5s) and only picks up a file once its
+  size/mtime has stayed unchanged across two scans (avoids reading a file
+  mid-copy).
+- Redacts **one file at a time, never in parallel** — the same
+  `RedactPipeline` the UI/API already use.
+- On success, writes `redacted_<name>.pdf` to `WATCH_OUTPUT_DIR` (default
+  `data/watch/output`) and removes the original from the input directory.
+- On any error, the original file is left untouched in the input directory
+  and retried automatically on the next scan — nothing is ever moved on
+  failure.
+
 ## Mock dictionary: curated seed vs. runtime cache
 
 `data/mock-dictionary/` splits into two files:

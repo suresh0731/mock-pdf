@@ -29,7 +29,7 @@ from app.services.locale.resolver import resolve_languages
 from app.services.ocr.ensemble import ensemble_ocr_page
 from app.services.ocr.ensemble_types import EnsembleWord
 from app.services.ocr.page_renderer import load_pages
-from app.services.pii.brand_zones import BrandZone, detect_brand_zones
+from app.services.pii.brand_zones import BrandZone, detect_brand_zones, detect_picture_zones
 from app.services.pii.coordinate_map import apply_padding, canonical_to_original
 from app.services.pii.custom_redact import find_term_spans
 from app.services.pii.ensemble_mapper import (
@@ -442,9 +442,15 @@ def _apply_spillover_safety_net(
         target.engines_seen = sorted(set(target.engines_seen) | set(word.engines))
 
 
+_BRAND_ZONE_ENTITY_TYPES = {
+    "footer": "BRAND_FOOTER",
+    "picture": "BRAND_IMAGE",
+}
+
+
 def _brand_region(zone: BrandZone, blur_tier: str, region_id: str) -> RedactionRegion:
     """Map BrandZone → RedactionRegion. Dummy scores; no dictionary row."""
-    entity_type = "BRAND_LOGO" if zone.zone == "logo" else "BRAND_FOOTER"
+    entity_type = _BRAND_ZONE_ENTITY_TYPES[zone.zone]
     dummy = ConfidenceBreakdown(
         presidio=0.0,
         ocr=0.0,
@@ -931,11 +937,17 @@ class RedactPipeline:
                 page_h=original.height,
                 page=canonical.page_index,
                 blocks=state.blocks,
-                patch_logo=opts.patch_logo,
                 patch_footer=opts.patch_footer,
-                logo_top_pct=self.settings.logo_zone_top_pct,
-                logo_right_pct=self.settings.logo_zone_right_pct,
                 footer_bottom_pct=self.settings.footer_zone_bottom_pct,
+            )
+            zones = zones + detect_picture_zones(
+                page_w=original.width,
+                page_h=original.height,
+                page=canonical.page_index,
+                blocks=state.blocks,
+                existing_zones=zones,
+                enabled=opts.patch_images and self.settings.patch_images_enabled,
+                min_area_pct=self.settings.image_zone_min_area_pct,
             )
             for zone in zones:
                 region_counter += 1

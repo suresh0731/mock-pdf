@@ -202,8 +202,8 @@ def _person_region_http(client: TestClient, audit: dict) -> dict:
 
 def test_redact_options_patch_flags_default_true():
     opts = RedactOptions()
-    assert opts.patch_logo is True
     assert opts.patch_footer is True
+    assert opts.patch_images is True
 
 
 def test_redaction_region_accepts_mock_fields():
@@ -233,13 +233,9 @@ def test_redaction_region_accepts_mock_fields():
 
 def test_settings_expose_mock_path_and_zone_percents(monkeypatch):
     monkeypatch.delenv("MOCK_DICTIONARY_PATH", raising=False)
-    monkeypatch.delenv("LOGO_ZONE_TOP_PCT", raising=False)
-    monkeypatch.delenv("LOGO_ZONE_RIGHT_PCT", raising=False)
     monkeypatch.delenv("FOOTER_ZONE_BOTTOM_PCT", raising=False)
     settings = Settings(_env_file=None)
     assert str(settings.mock_dictionary_path).endswith("mappings.json")
-    assert settings.logo_zone_top_pct == 0.12
-    assert settings.logo_zone_right_pct == 0.28
     assert settings.footer_zone_bottom_pct == 0.12
 
 
@@ -310,14 +306,77 @@ def test_structure_extraction_receives_original_not_line_stripped_image(tmp_path
     assert captured["image"].convert("RGB").tobytes() == page.convert("RGB").tobytes()
 
 
-def test_pipeline_default_options_emit_logo_and_footer(tmp_path, monkeypatch, patch_ocr_pii):
+def test_pipeline_default_options_emit_footer(tmp_path, monkeypatch, patch_ocr_pii):
     pipeline, _, _ = _pipeline(tmp_path, monkeypatch)
     _, audit, _ = _run(pipeline)
     brand = [r for r in audit.redactions if r.assignment_source == "brand"]
-    logos = [r for r in brand if r.mock_value == "LOGO"]
     footers = [r for r in brand if r.mock_value == "FOOTER"]
-    assert logos and footers
-    assert all(r.mapping_id is None for r in logos + footers)
+    assert footers
+    assert all(r.mapping_id is None for r in footers)
+
+
+def _mid_page_picture_block(page: int = 0) -> "DocBlock":
+    from app.services.structure.docling_adapter import DocBlock
+
+    # (720x1100) letter page: outside the footer (bottom strip) seed
+    # rectangle detect_brand_zones would compute at default percents —
+    # this position only gets covered by the position-agnostic
+    # detect_picture_zones() (there is no fixed logo zone anymore).
+    return DocBlock(
+        block_id="dl-mid",
+        block_type="picture",
+        bbox=BBox(x=100, y=500, w=200, h=150),
+        text="stamp",
+    )
+
+
+def test_pipeline_generic_image_zone_covers_mid_page_picture(tmp_path, monkeypatch, patch_ocr_pii):
+    pipeline, _, _ = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "app.pipeline.redact.extract_structure", lambda *a, **k: [_mid_page_picture_block()]
+    )
+    _, audit, _ = _run(pipeline)
+    images = [r for r in audit.redactions if r.mock_value == "IMAGE"]
+    assert len(images) == 1
+    image = images[0]
+    assert image.entity_type == "BRAND_IMAGE"
+    assert image.assignment_source == "brand"
+    assert image.mapping_id is None
+    assert (image.padded_bbox.x, image.padded_bbox.y) == (100, 500)
+
+
+def test_pipeline_generic_image_zone_disabled_via_option(tmp_path, monkeypatch, patch_ocr_pii):
+    pipeline, _, _ = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "app.pipeline.redact.extract_structure", lambda *a, **k: [_mid_page_picture_block()]
+    )
+    opts = RedactOptions(patch_images=False)
+    _, audit, _ = _run(pipeline, opts)
+    assert not [r for r in audit.redactions if r.mock_value == "IMAGE"]
+
+
+def test_pipeline_generic_image_zone_never_touches_mock_dictionary(
+    tmp_path, monkeypatch, patch_ocr_pii
+):
+    """The generic picture-zone path must stay fully isolated from the
+    mock-dictionary/ledger substitution mechanism: painting a mid-page
+    image never creates a new mapping (the seeded ORG/PERSON entries this
+    fixture's fake OCR text also matches are unrelated and may still have
+    their own hit_count bumped by that separate detection path) and only
+    ever appends to ledger.brand_zones (never ledger.entries)."""
+    pipeline, store, ledger_store = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "app.pipeline.redact.extract_structure", lambda *a, **k: [_mid_page_picture_block()]
+    )
+    source_texts_before = {e.source_text for e in store.list()}
+    _, audit, _ = _run(pipeline)
+    source_texts_after = {e.source_text for e in store.list()}
+    assert source_texts_after == source_texts_before
+    assert not any(e.mock_value == "IMAGE" for e in store.list())
+
+    ledger = ledger_store.get(audit.request_id)
+    assert not any(e.mock_value == "IMAGE" for e in ledger.entries)
+    assert any(z["zone"] == "picture" for z in ledger.brand_zones)
 
 
 def test_pipeline_custom_mock_label_upserts_user(tmp_path, monkeypatch, patch_ocr_pii):
@@ -503,12 +562,11 @@ def test_e2e_person_auto_person_nn(wired_app):
     assert MOCK_RE.fullmatch(person["mock_value"])
 
 
-def test_e2e_default_logo_footer_zones(wired_app):
+def test_e2e_default_footer_zone(wired_app):
     client, _ = wired_app
     response = _post_redact(client)
     audit = client.get(f"/v1/redact/audit/{response.headers['X-Request-Id']}").json()
     mocks = {r["mock_value"] for r in audit["redactions"] if r["assignment_source"] == "brand"}
-    assert "LOGO" in mocks
     assert "FOOTER" in mocks
 
 

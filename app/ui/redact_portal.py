@@ -379,8 +379,8 @@ def _build_redact_tab(ui: Any) -> None:
                         placeholder="e.g.\nAcme Corp\nJohn Smith=MOCK_NAME\n555-0100",
                     ).classes("w-full").props("outlined dark rows=3")
                     with ui.row().classes("w-full gap-4"):
-                        patch_logo = ui.checkbox("Cover logo", value=True)
                         patch_footer = ui.checkbox("Cover footer", value=True)
+                        patch_images = ui.checkbox("Cover images/graphics", value=True)
                     ocr_engine_select = ui.select(
                         _ocr_engine_options(),
                         label="OCR engine",
@@ -445,8 +445,8 @@ def _build_redact_tab(ui: Any) -> None:
                     selected_engine = ocr_engine_select.value
                     opts = RedactOptions(
                         custom_redactions=parse_custom_terms(terms_text),
-                        patch_logo=bool(patch_logo.value),
                         patch_footer=bool(patch_footer.value),
+                        patch_images=bool(patch_images.value),
                         ocr_engines=(
                             [selected_engine] if selected_engine and selected_engine != "auto" else None
                         ),

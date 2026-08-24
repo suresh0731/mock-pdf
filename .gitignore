@@ -15,3 +15,6 @@ data/mock-dictionary/*
 .fsd3/
 .mypy_cache/
 .ruff_cache/
+# Folder-watch ingestion scratch dirs (machine-local input/output for
+# app/services/watch/folder_watcher.py) — not source of truth.
+data/watch/

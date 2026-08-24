@@ -30,9 +30,17 @@ class Settings(BaseSettings):
 
     redact_pipeline_enabled: bool = True
     mock_dictionary_path: Path = Path("data/mock-dictionary/mappings.json")
-    logo_zone_top_pct: float = 0.12
-    logo_zone_right_pct: float = 0.28
     footer_zone_bottom_pct: float = 0.12
+    # Generic image/graphic redaction: unlike the fixed logo/footer percent
+    # zones above (tuned for one template's chrome placement), this covers
+    # every Docling-detected "picture" block anywhere on the page — see
+    # app/services/pii/brand_zones.py's detect_picture_zones(). Global
+    # default toggle; RedactOptions.patch_images overrides per-request.
+    patch_images_enabled: bool = True
+    # Minimum picture-block area (fraction of page area) to qualify for a
+    # generic image redaction zone — filters bullet icons/checkbox glyphs
+    # Docling may still classify as "picture".
+    image_zone_min_area_pct: float = 0.0015
     blur_threshold_good: float = 100.0
     blur_threshold_mild: float = 50.0
     padding_px_good: int = 4
@@ -152,6 +160,20 @@ class Settings(BaseSettings):
     # logs a loud warning instead. Set True for CI/production so a machine
     # silently missing an engine can never serve traffic.
     ocr_strict_engine_check: bool = False
+
+    # --- Folder-watch ingestion (extension, alongside UI/API upload) -------
+    # Polls `watch_input_dir` for new files and redacts them one at a time
+    # (never in parallel — see app/services/watch/folder_watcher.py), using
+    # the exact same RedactPipeline the UI/API already call. Disabled by
+    # default so it never changes existing upload-only behavior; opt in
+    # with WATCH_ENABLED=true.
+    watch_enabled: bool = False
+    watch_input_dir: Path = Path("data/watch/input")
+    watch_output_dir: Path = Path("data/watch/output")
+    # Seconds between directory scans. Also the minimum time a file's
+    # size/mtime must stay unchanged before it's picked up (protects
+    # against reading a file that's still being copied into the folder).
+    watch_poll_seconds: float = 5.0
 
 
 @lru_cache

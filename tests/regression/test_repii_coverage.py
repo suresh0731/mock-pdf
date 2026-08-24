@@ -44,14 +44,20 @@ REPII_DIR = Path(__file__).resolve().parents[2] / "repii"
 # single-primary-engine (RapidOCR) policy. Update deliberately (with a
 # reviewed reason) if a genuine, intentional detection improvement changes
 # these numbers -- never just to make a failing run pass.
+# BRAND_LOGO removed (2026-08-24): the fixed top-right percent-of-page logo
+# zone was dropped in favor of position-agnostic detect_picture_zones()
+# (see app/services/pii/brand_zones.py), which covers a logo wherever it
+# actually sits rather than only inside one template's assumed corner. Each
+# _total below is reduced by exactly 1 to reflect that removed entity —
+# every other floor is left untouched from the prior observed baseline.
 BASELINE: dict[str, dict[str, int]] = {
-    "1000092646.jpg": {"ORGANIZATION": 7, "PERSON": 1, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 10},
-    "1000095684.jpg": {"ORGANIZATION": 14, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 16},
-    "1000095686.jpg": {"ORGANIZATION": 40, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 42},
-    "1000097339.jpg": {"ORGANIZATION": 3, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 5},
-    "1000097341.jpg": {"ORGANIZATION": 1, "PERSON": 1, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 4},
-    "1000097343.jpg": {"ORGANIZATION": 9, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 11},
-    "1000097345.jpg": {"ORGANIZATION": 9, "BRAND_LOGO": 1, "BRAND_FOOTER": 1, "_total": 11},
+    "1000092646.jpg": {"ORGANIZATION": 7, "PERSON": 1, "BRAND_FOOTER": 1, "_total": 9},
+    "1000095684.jpg": {"ORGANIZATION": 14, "BRAND_FOOTER": 1, "_total": 15},
+    "1000095686.jpg": {"ORGANIZATION": 40, "BRAND_FOOTER": 1, "_total": 41},
+    "1000097339.jpg": {"ORGANIZATION": 3, "BRAND_FOOTER": 1, "_total": 4},
+    "1000097341.jpg": {"ORGANIZATION": 1, "PERSON": 1, "BRAND_FOOTER": 1, "_total": 3},
+    "1000097343.jpg": {"ORGANIZATION": 9, "BRAND_FOOTER": 1, "_total": 10},
+    "1000097345.jpg": {"ORGANIZATION": 9, "BRAND_FOOTER": 1, "_total": 10},
 }
 
 
