@@ -36,8 +36,8 @@ class InsertRowsResult:
 def insert_new_rows(
     store: MockDictionaryStoreProtocol, rows: list[dict[str, Any]]
 ) -> InsertRowsResult:
-    """Insert rows shaped like ``{source_text, mock_value, entity_type?,
-    account_number?, field_role?}`` without clobbering existing mappings.
+    """Insert rows shaped like ``{source_text, mock_value}`` without
+    clobbering existing mappings.
 
     A row is skipped whenever its normalized ``source_text`` already has a
     mapping — this is what lets a later reseed/reupload never silently
@@ -78,21 +78,8 @@ def insert_new_rows(
             skipped_existing += 1
             continue
 
-        entity_type = row.get("entity_type")
-        entity_type = entity_type if isinstance(entity_type, str) and entity_type else "CUSTOM"
-        account_number = row.get("account_number")
-        account_number = account_number if isinstance(account_number, str) and account_number else None
-        field_role = row.get("field_role")
-        field_role = field_role if isinstance(field_role, str) and field_role else None
-
         try:
-            store.upsert(
-                source_text,
-                mock_value,
-                entity_type,
-                account_number=account_number,
-                field_role=field_role,
-            )
+            store.upsert(source_text, mock_value)
         except Exception as exc:  # noqa: BLE001 - bulk rows must not crash the caller
             logger.warning("mapping row skipped: %s", type(exc).__name__)
             skipped_invalid += 1
@@ -113,8 +100,8 @@ def load_seed_entries(
     Args:
         store: Target mock dictionary store.
         seed_path: JSON file path (``{"entries": [...]}`` or a bare list of
-            ``{source_text, mock_value, entity_type?, account_number?,
-            field_role?}`` objects), or ``None``/missing to skip entirely.
+            ``{source_text, mock_value}`` objects), or ``None``/missing to
+            skip entirely.
 
     Returns:
         Number of new rows inserted. ``0`` if the path is unset, missing,

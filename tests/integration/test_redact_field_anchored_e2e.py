@@ -5,7 +5,7 @@ exercise dictionary/ledger/audit mechanics), these tests fake only OCR/
 Docling and let the real ``extract_field_candidates`` + ``MockDictionaryStore``
 run, using ``EnsembleWord`` fixtures modeled on the debit/credit letter
 template (see ``tests/test_field_extractor.py``). This validates the whole
-redesign end to end: label-anchored detection -> account-number/fuzzy mock
+redesign end to end: label-anchored detection -> fuzzy name-based mock
 resolution -> redaction regions, while account numbers and dates are never
 themselves redacted.
 """
@@ -175,7 +175,7 @@ def test_field_anchored_pipeline_redacts_debit_credit_and_bank(
 
     _, audit, _ = _run(pipeline)
 
-    debit = next(r for r in audit.redactions if r.entity_type == "ORGANIZATION" and r.mock_value.startswith("ORG_"))
+    debit = next(r for r in audit.redactions if r.entity_type == "ORGANIZATION" and r.mock_value)
     entity_types = {r.entity_type for r in audit.redactions}
     assert "ORGANIZATION" in entity_types
     assert debit.mock_value
@@ -215,10 +215,10 @@ def test_field_anchored_pipeline_never_redacts_account_numbers(
         assert credit_account_number not in (region.mock_value or "")
 
 
-def test_field_anchored_pipeline_reuses_mock_via_account_number_despite_ocr_noise(
+def test_field_anchored_pipeline_reuses_mock_despite_ocr_noise(
     field_anchored_pipeline, monkeypatch
 ):
-    """Same account number, heavily OCR-mangled name second time -> same mock."""
+    """Heavily OCR-mangled name second time still fuzzy-matches to the same mock."""
     pipeline, store, _ = field_anchored_pipeline
     account_number = "30608778491"
 
@@ -240,13 +240,10 @@ def test_field_anchored_pipeline_reuses_mock_via_account_number_despite_ocr_nois
     _, audit1, _ = _run(pipeline)
     _, audit2, _ = _run(pipeline)
 
-    debit1 = next(r for r in audit1.redactions if r.entity_type == "ORGANIZATION" and r.mock_value.startswith("ORG_"))
-    debit2 = next(r for r in audit2.redactions if r.entity_type == "ORGANIZATION" and r.mock_value.startswith("ORG_"))
+    debit1 = next(r for r in audit1.redactions if r.entity_type == "ORGANIZATION" and r.mock_value)
+    debit2 = next(r for r in audit2.redactions if r.entity_type == "ORGANIZATION" and r.mock_value)
     assert debit2.mapping_id == debit1.mapping_id
     assert debit2.mock_value == debit1.mock_value
-    matching_entries = [e for e in store.list() if e.account_number == account_number]
-    assert len(matching_entries) == 1
-    assert matching_entries[0].hit_count >= 2
 
 
 def test_field_anchored_pipeline_reuses_mock_via_fuzzy_match_without_account_number(
@@ -276,8 +273,8 @@ def test_field_anchored_pipeline_reuses_mock_via_fuzzy_match_without_account_num
     _, audit1, _ = _run(pipeline)
     _, audit2, _ = _run(pipeline)
 
-    debit1 = next(r for r in audit1.redactions if r.entity_type == "ORGANIZATION" and r.mock_value.startswith("ORG_"))
-    debit2 = next(r for r in audit2.redactions if r.entity_type == "ORGANIZATION" and r.mock_value.startswith("ORG_"))
+    debit1 = next(r for r in audit1.redactions if r.entity_type == "ORGANIZATION" and r.mock_value)
+    debit2 = next(r for r in audit2.redactions if r.entity_type == "ORGANIZATION" and r.mock_value)
     assert debit2.mapping_id == debit1.mapping_id
     assert debit2.mock_value == debit1.mock_value
 

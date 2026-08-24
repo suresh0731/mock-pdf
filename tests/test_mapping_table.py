@@ -22,7 +22,6 @@ LEDGER_SOURCE = "Standard Chartered Custody"
 LEDGER_ENTRY = {
     "source_text": LEDGER_SOURCE,
     "mock_value": "XXX",
-    "entity_type": "ORGANIZATION",
     "assignment_source": "user",
     "hit_count": 11,
     "mapping_id": "map_00a",
@@ -36,22 +35,23 @@ def test_rows_from_entries_maps_ledger_row() -> None:
     row = rows[0]
     assert row["source_text"] == LEDGER_SOURCE
     assert row["mock_value"] == "XXX"
-    assert row["entity_type"] == "ORGANIZATION"
     assert row["assignment_source"] == "user"
     assert row["hit_count"] == 11
     assert row["mapping_id"] == "map_00a"
     assert "pages" not in row
 
 
-def test_rows_from_entries_includes_field_role_and_account_number() -> None:
+def test_rows_from_entries_drops_legacy_category_fields() -> None:
+    """Old entries may still carry entity_type/field_role/account_number —
+    these are simply dropped, never surfaced in a row."""
     entry = {
         **LEDGER_ENTRY,
+        "entity_type": "ORGANIZATION",
         "field_role": "debit_account_name",
         "account_number": "30608778491",
     }
     rows = rows_from_entries([entry])
-    assert rows[0]["field_role"] == "debit_account_name"
-    assert rows[0]["account_number"] == "30608778491"
+    assert set(rows[0].keys()) == set(ROW_KEYS)
 
 
 def test_rows_from_entries_empty_list() -> None:
@@ -66,7 +66,6 @@ def test_rows_from_entries_drops_extra_keys() -> None:
     entry = {
         "source_text": LEDGER_SOURCE,
         "mock_value": "XXX",
-        "entity_type": "ORGANIZATION",
         "assignment_source": "user",
         "hit_count": 11,
         "mapping_id": "map_00a",
@@ -83,9 +82,6 @@ def test_rows_from_entries_defaults_missing_fields() -> None:
         {
             "source_text": "",
             "mock_value": "",
-            "entity_type": "",
-            "field_role": "",
-            "account_number": "",
             "assignment_source": "",
             "hit_count": 0,
             "mapping_id": "map_x",
@@ -142,62 +138,19 @@ def test_parse_override_raises_on_blank_mapping_id() -> None:
         parse_override("", "BANK_A")
 
 
-def test_parse_override_omits_field_role_and_account_when_not_given() -> None:
-    payload = parse_override("map_00a", "BANK_A")
-    assert "field_role" not in payload
-    assert "account_number" not in payload
-
-
-def test_parse_override_includes_field_role_and_account_when_given() -> None:
-    payload = parse_override("map_00a", "BANK_A", "debit_account_name", "111")
-    assert payload["field_role"] == "debit_account_name"
-    assert payload["account_number"] == "111"
-
-
-def test_parse_override_empty_field_role_clears_it() -> None:
-    payload = parse_override("map_00a", "BANK_A", "", "")
-    assert payload["field_role"] == ""
-    assert payload["account_number"] == ""
-
-
-def test_parse_override_passes_through_legacy_field_role_unvalidated() -> None:
-    # Rows created before the current FIELD_ROLE_OPTIONS list (or hand-
-    # edited) may carry a role outside it; re-saving must not corrupt it.
-    payload = parse_override("map_00a", "BANK_A", "addressee")
-    assert payload["field_role"] == "addressee"
-
-
 def test_parse_create_valid() -> None:
-    payload = parse_create("Acme Corp", "ORG_09", "ORGANIZATION", "bank_name", "999")
-    assert payload == {
-        "source_text": "Acme Corp",
-        "mock_value": "ORG_09",
-        "entity_type": "ORGANIZATION",
-        "field_role": "bank_name",
-        "account_number": "999",
-    }
-
-
-def test_parse_create_defaults_entity_type_to_custom() -> None:
-    payload = parse_create("Acme Corp", "ORG_09", "")
-    assert payload["entity_type"] == "CUSTOM"
-    assert "field_role" not in payload
-    assert "account_number" not in payload
+    payload = parse_create("Acme Corp", "ORG_09")
+    assert payload == {"source_text": "Acme Corp", "mock_value": "ORG_09"}
 
 
 def test_parse_create_raises_on_blank_source() -> None:
     with pytest.raises(ValueError):
-        parse_create("", "ORG_09", "ORGANIZATION")
+        parse_create("", "ORG_09")
 
 
 def test_parse_create_raises_on_blank_mock() -> None:
     with pytest.raises(ValueError):
-        parse_create("Acme Corp", "  ", "ORGANIZATION")
-
-
-def test_parse_create_accepts_any_field_role_string() -> None:
-    payload = parse_create("Acme Corp", "ORG_09", "ORGANIZATION", "custom_role")
-    assert payload["field_role"] == "custom_role"
+        parse_create("Acme Corp", "  ")
 
 
 def test_build_mapping_panel_is_callable() -> None:

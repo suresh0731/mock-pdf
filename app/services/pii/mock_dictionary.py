@@ -1,8 +1,13 @@
 """In-memory mock dictionary with write-through JSON snapshot.
 
 This module is a PII store: ``source_text`` is persisted in the snapshot
-only. Logs may include mapping_id, entity_type, and assignment_source —
-never source_text, normalized text, or a mock paired with its source.
+only. Logs may include mapping_id and assignment_source — never
+source_text, normalized text, or a mock paired with its source.
+
+Matching (exact and fuzzy) is by name text only. There is no notion of
+PII category, structural role, or account number scoping a match — the
+same source text always resolves to the same stored mapping regardless of
+what category the caller detected it under.
 """
 
 from __future__ import annotations
@@ -43,25 +48,10 @@ _AUTO_SUFFIX_FALLBACK_LENGTHS = (8, 12, 16, 32, 64)
 # unrelated organizations never exceed ~0.58 — comfortable separation.
 _TRUSTED_FUZZY_THRESHOLD = 0.65
 
-_PREFIX_ALIASES: dict[str, str] = {
-    "ORGANIZATION": "ORG",
-    "ORG": "ORG",
-    "PHONE_NUMBER": "PHONE",
-    "PHONE": "PHONE",
-    "EMAIL_ADDRESS": "EMAIL",
-    "EMAIL": "EMAIL",
-    "ADDRESS": "ADDR",
-    "ADDR": "ADDR",
-    "LOCATION": "ADDR",
-    "NRIC": "ID",
-    "US_SSN": "ID",
-    "ID": "ID",
-    "ACCOUNT_NUMBER": "ACCT",
-    "ACCOUNT": "ACCT",
-    "ACCT": "ACCT",
-    "DATE_TIME": "DATE",
-    "DATE": "DATE",
-}
+# Every auto-assigned mock value shares one generic prefix — matching (and
+# the mock value itself) is by name text only, irrespective of whatever PII
+# category the caller detected the span as.
+_AUTO_MOCK_PREFIX = "MOCK"
 
 
 class _Snapshot(BaseModel):
@@ -90,23 +80,6 @@ def normalize_source(source_text: str) -> str:
     return " ".join(source_text.casefold().split())
 
 
-def prefix_for_entity_type(entity_type: str) -> str:
-    """Map a Presidio/custom entity type to an auto-mock prefix.
-
-    Args:
-        entity_type: Detector or user label (e.g. ``ORGANIZATION``).
-
-    Returns:
-        Prefix such as ``ORG``, ``PERSON``, or the first 8 alphanumeric
-        characters of the uppercased type (``CUSTOM`` if empty).
-    """
-    key = entity_type.upper().replace(" ", "_")
-    if key in _PREFIX_ALIASES:
-        return _PREFIX_ALIASES[key]
-    alnum = "".join(ch for ch in key if ch.isalnum())
-    return alnum[:8] if alnum else "CUSTOM"
-
-
 def _require_normalized(source_text: str) -> str:
     """Return the lookup key or raise without embedding the rejected text."""
     if not source_text.strip():
@@ -130,15 +103,15 @@ def _auto_suffix_hash(prefix: str, normalized_source_text: str, length: int) -> 
     return digest[:length].upper()
 
 
-def deterministic_auto_mock_value(entity_type: str, normalized_source_text: str) -> str:
-    """Content-derived auto mock value: ``{PREFIX}_{HASH}``.
+def deterministic_auto_mock_value(normalized_source_text: str) -> str:
+    """Content-derived auto mock value: ``MOCK_{HASH}``.
 
-    Same ``(entity_type, normalized_source_text)`` always yields the same
-    mock value on every machine, independent of run history or
-    order-of-first-sight — replaces the old sequential per-type counter
-    (``ORG_01``, ``ORG_02``, ...), where the label a never-seen value got
-    depended on how many other new values had already been auto-assigned
-    on that particular machine.
+    Same ``normalized_source_text`` always yields the same mock value on
+    every machine, independent of run history, order-of-first-sight, or
+    the PII category the caller detected the span as — replaces the old
+    sequential per-type counter (``ORG_01``, ``ORG_02``, ...), where the
+    label a never-seen value got depended on how many other new values
+    had already been auto-assigned on that particular machine.
 
     This is the *collision-naive* default-length form used directly by
     callers that just need a deterministic label (e.g. tests predicting an
@@ -148,15 +121,16 @@ def deterministic_auto_mock_value(entity_type: str, normalized_source_text: str)
     within one dictionary.
 
     Args:
-        entity_type: Detector or user label (e.g. ``ORGANIZATION``).
         normalized_source_text: Already-normalized lookup key (see
             ``normalize_source``) — never the raw/unnormalized text.
 
     Returns:
-        A ``{PREFIX}_{HASH}`` mock value, e.g. ``"ORG_1F3A9C"``.
+        A ``MOCK_{HASH}`` mock value, e.g. ``"MOCK_1F3A9C"``.
     """
-    prefix = prefix_for_entity_type(entity_type)
-    return f"{prefix}_{_auto_suffix_hash(prefix, normalized_source_text, _AUTO_SUFFIX_LENGTH)}"
+    return (
+        f"{_AUTO_MOCK_PREFIX}_"
+        f"{_auto_suffix_hash(_AUTO_MOCK_PREFIX, normalized_source_text, _AUTO_SUFFIX_LENGTH)}"
+    )
 
 
 class _InMemoryDictionary:
@@ -165,7 +139,6 @@ class _InMemoryDictionary:
     def __init__(self, fuzzy_threshold: float = DEFAULT_FUZZY_THRESHOLD) -> None:
         self._by_normalized: dict[str, MockEntry] = {}
         self._by_id: dict[str, MockEntry] = {}
-        self._by_account_number: dict[str, str] = {}
         self._fuzzy_threshold = fuzzy_threshold
         self._lock = threading.RLock()
 
@@ -174,10 +147,9 @@ class _InMemoryDictionary:
 
     def _log(self, action: str, entry: MockEntry) -> None:
         logger.info(
-            "mock_%s mapping_id=%s entity_type=%s assignment_source=%s",
+            "mock_%s mapping_id=%s assignment_source=%s",
             action,
             entry.mapping_id,
-            entry.entity_type,
             entry.assignment_source,
         )
 
@@ -187,19 +159,18 @@ class _InMemoryDictionary:
             if mapping_id not in self._by_id:
                 return mapping_id
 
-    def _auto_mock_value(self, entity_type: str, normalized: str) -> str:
+    def _auto_mock_value(self, normalized: str) -> str:
         """Deterministic auto mock value, extending the hash on collision.
 
         A collision (a *different* normalized value already holding the
         same mock_value string) is vanishingly unlikely at the default
         suffix length but handled deterministically rather than ignored:
         the suffix length grows until the candidate is unique, so the
-        result still depends only on ``(entity_type, normalized)`` — never
-        on insertion order.
+        result still depends only on ``normalized`` — never on insertion
+        order.
         """
-        prefix = prefix_for_entity_type(entity_type)
         for length in (_AUTO_SUFFIX_LENGTH, *_AUTO_SUFFIX_FALLBACK_LENGTHS):
-            candidate = f"{prefix}_{_auto_suffix_hash(prefix, normalized, length)}"
+            candidate = f"{_AUTO_MOCK_PREFIX}_{_auto_suffix_hash(_AUTO_MOCK_PREFIX, normalized, length)}"
             collision = any(
                 entry.mock_value == candidate and entry.normalized != normalized
                 for entry in self._by_id.values()
@@ -208,51 +179,37 @@ class _InMemoryDictionary:
                 return candidate
         return candidate
 
-    def _best_match(
-        self, normalized: str, entity_type: str, field_role: str | None
-    ) -> tuple[str | None, float]:
-        """Best same-type entry and its ratio, regardless of threshold (or
-        ``(None, 0.0)`` if there are no same-type/role-eligible entries).
+    def _best_match(self, normalized: str) -> tuple[str | None, float]:
+        """Best-scoring entry and its ratio, regardless of threshold (or
+        ``(None, 0.0)`` if the dictionary is empty).
 
         Shared scoring core for ``_find_fuzzy_match`` (applies the
         threshold) and ``best_match_score`` (a pure, threshold-free ratio
         used by the maximal-munch window-extension probe — see
-        ``app.pipeline.redact``). See ``_find_fuzzy_match`` for the
-        trusted-vs-auto scoping rationale.
+        ``app.pipeline.redact``). Matching is by name text only,
+        irrespective of any PII category — see ``_find_fuzzy_match``.
         """
         best_id: str | None = None
         best_ratio = 0.0
         for entry in self._by_id.values():
-            if entry.entity_type != entity_type:
-                continue
-            trusted = entry.assignment_source == "user"
-            if not trusted and field_role and entry.field_role and entry.field_role != field_role:
-                continue
             ratio = token_sort_ratio(normalized, entry.normalized)
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_id = entry.mapping_id
         return best_id, best_ratio
 
-    def _find_fuzzy_match(
-        self, normalized: str, entity_type: str, field_role: str | None
-    ) -> str | None:
-        """Best same-type entry above its applicable fuzzy threshold, or None.
+    def _find_fuzzy_match(self, normalized: str) -> str | None:
+        """Best entry above its applicable fuzzy threshold, or None.
 
-        Scoped to the same ``entity_type``. Auto-assigned entries are also
-        scoped to the same ``field_role`` (when both the candidate and the
-        entry state one) and compared at the standard, stricter threshold —
-        this is how OCR variants of an *unverified* name collapse into a
-        single mapping instead of accumulating duplicates, without risking
-        two genuinely different auto-detected organizations merging.
-
-        Manually curated (``assignment_source == "user"``) entries are
-        verified ground truth, so they're compared at a lower threshold and
-        without the ``field_role`` restriction: the same real value can
-        legitimately be found by a different extraction mode (e.g. a table
-        column vs. an address block, or as the debit side in one letter and
-        the credit side in another) and should still collapse onto the one
-        curated row rather than spawning a fresh auto-assigned duplicate.
+        Matching applies irrespective of any PII category the caller
+        detected the span as — a name resolves to the same mapping no
+        matter which category it was flagged under. Manually curated
+        (``assignment_source == "user"``) entries are verified ground
+        truth, so they're compared at a lower threshold than auto-vs-auto
+        matching: the same real value can legitimately be found by a
+        different extraction mode (e.g. a table column vs. an address
+        block) and should still collapse onto the one curated row rather
+        than spawning a fresh auto-assigned duplicate.
 
         This threshold check can't fully share ``_best_match``'s single
         best-ratio-wins result: the *applicable* threshold itself depends
@@ -264,11 +221,7 @@ class _InMemoryDictionary:
         best_id: str | None = None
         best_ratio = -1.0
         for entry in self._by_id.values():
-            if entry.entity_type != entity_type:
-                continue
             trusted = entry.assignment_source == "user"
-            if not trusted and field_role and entry.field_role and entry.field_role != field_role:
-                continue
             threshold = _TRUSTED_FUZZY_THRESHOLD if trusted else self._fuzzy_threshold
             ratio = token_sort_ratio(normalized, entry.normalized)
             if ratio >= threshold and ratio > best_ratio:
@@ -276,10 +229,8 @@ class _InMemoryDictionary:
                 best_id = entry.mapping_id
         return best_id
 
-    def best_match_score(
-        self, normalized: str, entity_type: str, field_role: str | None = None
-    ) -> float:
-        """Best fuzzy-match ratio against known same-type entries, or ``0.0``.
+    def best_match_score(self, normalized: str) -> float:
+        """Best fuzzy-match ratio against known entries, or ``0.0``.
 
         Pure read: unlike ``resolve``/``lookup``, never mutates
         ``hit_count``/``updated_at`` on a match — safe to call speculatively
@@ -290,25 +241,22 @@ class _InMemoryDictionary:
         Args:
             normalized: Already-normalized candidate text (see
                 ``normalize_source``).
-            entity_type: Scopes the search to same-type entries only.
-            field_role: Optional structural role, used the same way
-                ``_find_fuzzy_match`` uses it (auto-assigned entries only).
 
         Returns:
             Ratio in ``[0.0, 1.0]``. ``0.0`` if ``normalized`` is blank or
-            no same-type/role-eligible entry exists.
+            the dictionary is empty.
         """
         if not normalized.strip():
             return 0.0
         with self._lock:
-            _, ratio = self._best_match(normalized, entity_type, field_role)
+            _, ratio = self._best_match(normalized)
         return ratio
 
     def find_prefix_collisions(
-        self, normalized: str, entity_type: str, *, exclude_mapping_id: str | None = None
+        self, normalized: str, *, exclude_mapping_id: str | None = None
     ) -> list[MockEntry]:
-        """Other same-type entries whose tokens strictly contain, or are
-        strictly contained by, ``normalized``'s tokens.
+        """Other entries whose tokens strictly contain, or are strictly
+        contained by, ``normalized``'s tokens.
 
         Uses ``rapidfuzz``'s ``token_set_ratio`` (via
         ``is_token_subset_collision``, 100 whenever one string's token
@@ -332,7 +280,6 @@ class _InMemoryDictionary:
         Args:
             normalized: Already-normalized candidate text (see
                 ``normalize_source``).
-            entity_type: Scopes the search to same-type entries only.
             exclude_mapping_id: Optional mapping id to omit from results
                 (typically the entry ``normalized`` already resolved to).
 
@@ -346,82 +293,60 @@ class _InMemoryDictionary:
             return [
                 entry.model_copy(deep=True)
                 for entry in self._by_id.values()
-                if entry.entity_type == entity_type
-                and entry.mapping_id != exclude_mapping_id
+                if entry.mapping_id != exclude_mapping_id
                 and entry.normalized != normalized
                 and is_token_subset_collision(normalized, entry.normalized)
             ]
 
     def _log_prefix_collision_if_any(
-        self, normalized: str, entity_type: str, resolved_mapping_id: str | None
+        self, normalized: str, resolved_mapping_id: str | None
     ) -> None:
         """Warn (mapping ids/counts only, never text — SEC-001) when a
         resolution is ambiguous under ``find_prefix_collisions``."""
         collisions = self.find_prefix_collisions(
-            normalized, entity_type, exclude_mapping_id=resolved_mapping_id
+            normalized, exclude_mapping_id=resolved_mapping_id
         )
         if collisions:
             logger.warning(
-                "mock_prefix_collision_detected mapping_id=%s entity_type=%s "
-                "colliding_mapping_ids=%s",
+                "mock_prefix_collision_detected mapping_id=%s colliding_mapping_ids=%s",
                 resolved_mapping_id,
-                entity_type,
                 sorted(entry.mapping_id for entry in collisions),
             )
 
     def _resolve_or_lookup(
         self,
         source_text: str,
-        entity_type: str,
         user_mock: str | None,
-        account_number: str | None,
-        field_role: str | None,
         *,
         create_if_missing: bool,
     ) -> MockEntry | None:
         """Shared implementation for ``resolve`` (may create) and ``lookup``
         (read-only — returns ``None`` instead of auto-assigning).
 
-        Lookup order: exact normalized text match, then (if ``account_number``
-        is given and already known) that account's mapping regardless of
-        name spelling, then a fuzzy name match (see ``_find_fuzzy_match``),
-        then — only when ``create_if_missing`` — a fresh auto-assigned entry.
+        Lookup order: exact normalized text match, then a fuzzy name match
+        (see ``_find_fuzzy_match``), then — only when ``create_if_missing``
+        — a fresh auto-assigned entry. Matching never depends on any PII
+        category the caller detected the span as: the same name text
+        always resolves to the same mapping.
         """
         normalized = _require_normalized(source_text)
         override = _nonblank(user_mock)
-        acct = _nonblank(account_number)
         now = datetime.now(timezone.utc)
         with self._lock:
             existing = self._by_normalized.get(normalized)
 
-            if existing is None and acct is not None:
-                mapped_id = self._by_account_number.get(acct)
-                if mapped_id is not None:
-                    existing = self._by_id.get(mapped_id)
-
             if existing is None:
-                fuzzy_id = self._find_fuzzy_match(normalized, entity_type, field_role)
+                fuzzy_id = self._find_fuzzy_match(normalized)
                 if fuzzy_id is not None:
                     existing = self._by_id.get(fuzzy_id)
 
             if existing is not None:
-                self._log_prefix_collision_if_any(normalized, entity_type, existing.mapping_id)
+                self._log_prefix_collision_if_any(normalized, existing.mapping_id)
                 existing.hit_count += 1
                 existing.updated_at = now
                 if override is not None:
                     existing.mock_value = override
                     existing.assignment_source = "user"
-                if acct is not None and not existing.account_number:
-                    # Only fill in a missing account number, never overwrite
-                    # one already on file: a fuzzy name match can pair with
-                    # an OCR-mangled digit string from *this* particular
-                    # read, and blindly overwriting would corrupt a stable
-                    # (often curated, ground-truth) account number with
-                    # that noise.
-                    existing.account_number = acct
-                    self._by_account_number[acct] = existing.mapping_id
-                if field_role is not None and not existing.field_role:
-                    existing.field_role = field_role
                 self._by_normalized.setdefault(normalized, existing)
                 self._after_mutate()
                 self._log("resolve", existing)
@@ -430,14 +355,14 @@ class _InMemoryDictionary:
             if not create_if_missing:
                 return None
 
-            self._log_prefix_collision_if_any(normalized, entity_type, None)
+            self._log_prefix_collision_if_any(normalized, None)
 
             assignment_source: Literal["auto", "user"]
             if override is not None:
                 mock_value = override
                 assignment_source = "user"
             else:
-                mock_value = self._auto_mock_value(entity_type, normalized)
+                mock_value = self._auto_mock_value(normalized)
                 assignment_source = "auto"
 
             entry = MockEntry(
@@ -445,18 +370,13 @@ class _InMemoryDictionary:
                 source_text=source_text,
                 normalized=normalized,
                 mock_value=mock_value,
-                entity_type=entity_type,
                 assignment_source=assignment_source,
                 hit_count=1,
                 created_at=now,
                 updated_at=now,
-                account_number=acct,
-                field_role=field_role,
             )
             self._by_id[entry.mapping_id] = entry
             self._by_normalized[normalized] = entry
-            if acct is not None:
-                self._by_account_number[acct] = entry.mapping_id
             self._after_mutate()
             self._log("resolve", entry)
             return entry.model_copy(deep=True)
@@ -464,22 +384,17 @@ class _InMemoryDictionary:
     def resolve(
         self,
         source_text: str,
-        entity_type: str,
         user_mock: str | None = None,
-        account_number: str | None = None,
-        field_role: str | None = None,
     ) -> MockEntry:
         """Lookup or auto-assign a mock. Non-blank user_mock becomes user.
 
+        Matching is by name text only, irrespective of the PII category
+        the caller detected the span as — the same patch applies no
+        matter what category a name is found under.
+
         Args:
             source_text: Original span text (PII).
-            entity_type: Detector type used for the auto prefix.
             user_mock: Optional override for this resolve.
-            account_number: Optional stable key; numbers don't drift with
-                OCR the way names do, so this takes priority over fuzzy
-                name matching when present.
-            field_role: Optional structural role (e.g.
-                ``debit_account_name``) used to scope fuzzy matching.
 
         Returns:
             The stored mapping (copy). Always creates one if nothing matches.
@@ -487,31 +402,20 @@ class _InMemoryDictionary:
         Raises:
             MockValidationError: If ``source_text`` is empty/whitespace.
         """
-        entry = self._resolve_or_lookup(
-            source_text, entity_type, user_mock, account_number, field_role, create_if_missing=True
-        )
+        entry = self._resolve_or_lookup(source_text, user_mock, create_if_missing=True)
         assert entry is not None  # create_if_missing=True never returns None
         return entry
 
-    def lookup(
-        self,
-        source_text: str,
-        entity_type: str,
-        account_number: str | None = None,
-        field_role: str | None = None,
-    ) -> MockEntry | None:
+    def lookup(self, source_text: str) -> MockEntry | None:
         """Read-only match against known entries — never auto-assigns.
 
-        Same lookup order as ``resolve`` (exact normalized, then account
-        number, then fuzzy match), but returns ``None`` instead of creating
-        a new auto-assigned mapping when nothing matches. Used when
-        detection is restricted to the curated dictionary only.
+        Same lookup order as ``resolve`` (exact normalized, then fuzzy
+        match), but returns ``None`` instead of creating a new
+        auto-assigned mapping when nothing matches. Used when detection is
+        restricted to the curated dictionary only.
 
         Args:
             source_text: Original span text (PII).
-            entity_type: Detector type, used to scope matching.
-            account_number: Optional stable key checked before fuzzy match.
-            field_role: Optional structural role used to scope fuzzy match.
 
         Returns:
             The stored mapping (copy), or ``None`` if nothing matches.
@@ -519,9 +423,7 @@ class _InMemoryDictionary:
         Raises:
             MockValidationError: If ``source_text`` is empty/whitespace.
         """
-        return self._resolve_or_lookup(
-            source_text, entity_type, None, account_number, field_role, create_if_missing=False
-        )
+        return self._resolve_or_lookup(source_text, None, create_if_missing=False)
 
     def list(self) -> list[MockEntry]:
         """Return deep copies of all entries.
@@ -532,23 +434,12 @@ class _InMemoryDictionary:
         with self._lock:
             return [row.model_copy(deep=True) for row in self._by_id.values()]
 
-    def upsert(
-        self,
-        source_text: str,
-        mock_value: str,
-        entity_type: str = "CUSTOM",
-        account_number: str | None = None,
-        field_role: str | None = None,
-    ) -> MockEntry:
+    def upsert(self, source_text: str, mock_value: str) -> MockEntry:
         """Create or replace a user-assigned mapping.
 
         Args:
             source_text: Original text to map (PII).
             mock_value: Non-blank replacement painted on the PDF.
-            entity_type: Type label for a newly created row.
-            account_number: Optional stable key for later account-number
-                priority lookups via ``resolve``.
-            field_role: Optional structural role for a newly created row.
 
         Returns:
             The stored mapping (copy).
@@ -560,7 +451,6 @@ class _InMemoryDictionary:
         cleaned = _nonblank(mock_value)
         if cleaned is None:
             raise MockValidationError("mock_value", "empty")
-        acct = _nonblank(account_number)
         now = datetime.now(timezone.utc)
         with self._lock:
             existing = self._by_normalized.get(normalized)
@@ -568,11 +458,6 @@ class _InMemoryDictionary:
                 existing.mock_value = cleaned
                 existing.assignment_source = "user"
                 existing.updated_at = now
-                if acct is not None:
-                    existing.account_number = acct
-                    self._by_account_number[acct] = existing.mapping_id
-                if field_role is not None:
-                    existing.field_role = field_role
                 self._after_mutate()
                 self._log("upsert", existing)
                 return existing.model_copy(deep=True)
@@ -582,45 +467,23 @@ class _InMemoryDictionary:
                 source_text=source_text,
                 normalized=normalized,
                 mock_value=cleaned,
-                entity_type=entity_type,
                 assignment_source="user",
                 hit_count=0,
                 created_at=now,
                 updated_at=now,
-                account_number=acct,
-                field_role=field_role,
             )
             self._by_id[entry.mapping_id] = entry
             self._by_normalized[normalized] = entry
-            if acct is not None:
-                self._by_account_number[acct] = entry.mapping_id
             self._after_mutate()
             self._log("upsert", entry)
             return entry.model_copy(deep=True)
 
-    def override(
-        self,
-        mapping_id: str,
-        mock_value: str,
-        field_role: str | None = None,
-        account_number: str | None = None,
-    ) -> MockEntry:
-        """Replace mock_value (and optionally field_role/account_number).
-
-        Unlike ``resolve()``'s conservative "fill in only if missing"
-        behaviour — needed there because an auto-detected candidate's own
-        account number/role can be OCR noise — this is an explicit,
-        UI/API-driven correction, so ``field_role``/``account_number`` are
-        allowed to overwrite an existing value, not just fill a blank one.
+    def override(self, mapping_id: str, mock_value: str) -> MockEntry:
+        """Replace the stored mock_value for an existing mapping.
 
         Args:
             mapping_id: Stable id from a prior resolve/upsert.
             mock_value: Non-blank user replacement.
-            field_role: When given, replaces the stored role. An empty
-                string clears it; ``None`` (default) leaves it untouched.
-            account_number: When given, replaces the stored account number
-                (and its reverse-lookup index entry). An empty string
-                clears it; ``None`` (default) leaves it untouched.
 
         Returns:
             The updated mapping (copy).
@@ -638,15 +501,6 @@ class _InMemoryDictionary:
                 raise MockValidationError("mock_value", "empty")
             entry.mock_value = cleaned
             entry.assignment_source = "user"
-            if field_role is not None:
-                entry.field_role = _nonblank(field_role)
-            if account_number is not None:
-                if entry.account_number is not None:
-                    self._by_account_number.pop(entry.account_number, None)
-                new_acct = _nonblank(account_number)
-                entry.account_number = new_acct
-                if new_acct is not None:
-                    self._by_account_number[new_acct] = entry.mapping_id
             entry.updated_at = datetime.now(timezone.utc)
             self._after_mutate()
             self._log("override", entry)
@@ -701,8 +555,6 @@ class MockDictionaryStore(_InMemoryDictionary):
         for entry in snapshot.entries:
             self._by_id[entry.mapping_id] = entry
             self._by_normalized[entry.normalized] = entry
-            if entry.account_number:
-                self._by_account_number[entry.account_number] = entry.mapping_id
 
     def _persist(self) -> None:
         snapshot = _Snapshot(

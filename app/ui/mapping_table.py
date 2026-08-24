@@ -3,12 +3,16 @@
 Pure helpers stay importable without a NiceGUI page context. Integration
 mounts ``build_mapping_panel`` and injects store callbacks. This module
 does not log ``source_text`` or other PII values.
+
+Only ``source_text`` (Name) and ``mock_value`` (Mock value) are shown or
+editable here — matching applies to a name irrespective of whatever PII
+category it was detected as, so there is nothing else to tag.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NotRequired, TypedDict
+from typing import TypedDict
 
 
 class MappingRow(TypedDict):
@@ -16,27 +20,16 @@ class MappingRow(TypedDict):
 
     source_text: str
     mock_value: str
-    entity_type: str
     assignment_source: str
     hit_count: int
     mapping_id: str
-    field_role: str
-    account_number: str
 
 
 class OverridePayload(TypedDict):
-    """Validated edit sent to the injected ``on_override`` callback.
-
-    ``field_role``/``account_number`` are only present when the caller
-    actually supplied a value (even an empty one, which clears the stored
-    field) — a bare ``parse_override(mapping_id, mock_value)`` call omits
-    them entirely so existing mock_value-only callers are unaffected.
-    """
+    """Validated edit sent to the injected ``on_override`` callback."""
 
     mapping_id: str
     mock_value: str
-    field_role: NotRequired[str]
-    account_number: NotRequired[str]
 
 
 class CreatePayload(TypedDict):
@@ -44,9 +37,6 @@ class CreatePayload(TypedDict):
 
     source_text: str
     mock_value: str
-    entity_type: str
-    field_role: NotRequired[str]
-    account_number: NotRequired[str]
 
 
 # Displayed in the table in this order; ``mapping_id`` is carried in row
@@ -55,64 +45,21 @@ class CreatePayload(TypedDict):
 ROW_KEYS: tuple[str, ...] = (
     "source_text",
     "mock_value",
-    "entity_type",
-    "field_role",
-    "account_number",
     "assignment_source",
     "hit_count",
     "mapping_id",
 )
 
-_DISPLAY_KEYS: tuple[str, ...] = (
-    "source_text",
-    "mock_value",
-    "entity_type",
-    "field_role",
-    "account_number",
-    "assignment_source",
-    "hit_count",
-)
+_DISPLAY_KEYS: tuple[str, ...] = ("source_text", "mock_value")
 
 _COLUMN_LABELS: dict[str, str] = {
-    "source_text": "Source",
-    "mock_value": "Mock",
-    "entity_type": "Entity",
-    "field_role": "Debit / Credit / Role",
-    "account_number": "Account No",
+    "source_text": "Name",
+    "mock_value": "Mock value",
     "assignment_source": "Assignment",
     "hit_count": "Hits",
     "mapping_id": "Mapping ID",
     "actions": "",
 }
-
-# Structural role a mapping plays in a bank-letter table (see
-# ``app.services.pii.field_labels.FieldRole``). Shown as a labeled select in
-# the edit/create dialogs and rendered as a colored badge in the table so
-# it's obvious at a glance which side (debit vs. credit) an account/name
-# belongs to — this is stored on every ``MockEntry`` and does influence
-# matching (see ``mock_dictionary._find_fuzzy_match``): it scopes fuzzy
-# matching for auto-detected entries so an unrelated debit-side and
-# credit-side auto match never collapse into one mapping, while manually
-# curated rows ignore it (the same real entity can legitimately appear as
-# debit in one letter and credit in another).
-FIELD_ROLE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("", "(none)"),
-    ("debit_account_name", "Debit — Account Name"),
-    ("credit_account_name", "Credit — Account Name"),
-    ("bank_name", "Bank Name"),
-    ("counterparty_org", "Counterparty Org"),
-    ("signatory_person", "Signatory Person"),
-)
-
-ENTITY_TYPE_OPTIONS: tuple[str, ...] = (
-    "ORGANIZATION",
-    "PERSON",
-    "PHONE_NUMBER",
-    "EMAIL_ADDRESS",
-    "ADDRESS",
-    "ACCOUNT_NUMBER",
-    "CUSTOM",
-)
 
 
 def _as_str(value: object) -> str:
@@ -157,9 +104,6 @@ def rows_from_entries(entries: list[dict] | None) -> list[MappingRow]:
             {
                 "source_text": _as_str(item.get("source_text")),
                 "mock_value": _as_str(item.get("mock_value")),
-                "entity_type": _as_str(item.get("entity_type")),
-                "field_role": _as_str(item.get("field_role")),
-                "account_number": _as_str(item.get("account_number")),
                 "assignment_source": _as_str(item.get("assignment_source")),
                 "hit_count": _as_hit_count(item.get("hit_count")),
                 "mapping_id": _as_str(item.get("mapping_id")),
@@ -168,30 +112,15 @@ def rows_from_entries(entries: list[dict] | None) -> list[MappingRow]:
     return rows
 
 
-def parse_override(
-    mapping_id: str,
-    mock_value: str,
-    field_role: str | None = None,
-    account_number: str | None = None,
-) -> OverridePayload:
+def parse_override(mapping_id: str, mock_value: str) -> OverridePayload:
     """Validate an edit payload. Raises ValueError on bad input.
 
     Args:
         mapping_id: Dictionary/ledger mapping identifier.
         mock_value: Replacement mock text (must be non-blank after strip).
-        field_role: Optional role correction. ``None`` (default) means
-            "leave unchanged"; an empty/whitespace string clears it. Not
-            restricted to ``FIELD_ROLE_OPTIONS`` — that list only curates
-            the dialog's dropdown; older rows may carry a role from before
-            the current set (or a hand-edited one), and re-saving such a
-            row without touching that field must not corrupt it.
-        account_number: Optional account-number correction. ``None``
-            (default) means "leave unchanged"; any other value (including
-            empty, which clears it) is stripped and stored as-is.
 
     Returns:
-        Stripped ``mapping_id``/``mock_value``, plus ``field_role``/
-        ``account_number`` only if they were actually passed.
+        Stripped ``mapping_id``/``mock_value``.
 
     Raises:
         ValueError: If ``mock_value``/``mapping_id`` is empty after strip.
@@ -202,30 +131,15 @@ def parse_override(
         raise ValueError("mock_value is required")
     if mapping_id == "":
         raise ValueError("mapping_id is required")
-    payload: OverridePayload = {"mapping_id": mapping_id, "mock_value": mock_value}
-    if field_role is not None:
-        payload["field_role"] = field_role.strip()
-    if account_number is not None:
-        payload["account_number"] = account_number.strip()
-    return payload
+    return {"mapping_id": mapping_id, "mock_value": mock_value}
 
 
-def parse_create(
-    source_text: str,
-    mock_value: str,
-    entity_type: str = "CUSTOM",
-    field_role: str | None = None,
-    account_number: str | None = None,
-) -> CreatePayload:
+def parse_create(source_text: str, mock_value: str) -> CreatePayload:
     """Validate a brand-new mapping payload. Raises ValueError on bad input.
 
     Args:
         source_text: Original text to map (must be non-blank after strip).
         mock_value: Replacement mock text (must be non-blank after strip).
-        entity_type: Type label; blank falls back to ``CUSTOM``.
-        field_role: Optional role; blank/omitted means none. Not
-            restricted to ``FIELD_ROLE_OPTIONS`` (see ``parse_override``).
-        account_number: Optional account number; blank/omitted means none.
 
     Returns:
         Stripped fields ready for ``MockDictionaryStoreProtocol.upsert``.
@@ -239,17 +153,7 @@ def parse_create(
         raise ValueError("source_text is required")
     if mock_value == "":
         raise ValueError("mock_value is required")
-    entity_type = (entity_type or "").strip() or "CUSTOM"
-    payload: CreatePayload = {
-        "source_text": source_text,
-        "mock_value": mock_value,
-        "entity_type": entity_type,
-    }
-    if field_role and field_role.strip():
-        payload["field_role"] = field_role.strip()
-    if account_number and account_number.strip():
-        payload["account_number"] = account_number.strip()
-    return payload
+    return {"source_text": source_text, "mock_value": mock_value}
 
 
 def build_mapping_toolbar(
@@ -277,7 +181,7 @@ def build_mapping_toolbar(
             icon="download",
             on_click=on_download_mappings,
         ).props("color=primary unelevated").tooltip(
-            "Save every current source → mock mapping as CSV"
+            "Save every current name → mock mapping as CSV"
         )
         ui.button(
             "Download template",
@@ -296,19 +200,6 @@ def build_mapping_toolbar(
             ).tooltip(
                 "Add new mappings from a CSV — existing ones are never overwritten"
             )
-
-
-def _field_role_badge_slot() -> str:
-    """Quasar template: colored badge for the field_role column, or a dash."""
-    return r"""
-        <q-td :props="props" key="field_role">
-            <q-badge
-                v-if="props.value"
-                :color="props.value.includes('debit') ? 'blue' : (props.value.includes('credit') ? 'green' : 'grey-6')"
-            >{{ props.value.replaceAll('_', ' ') }}</q-badge>
-            <span v-else class="text-grey-6">—</span>
-        </q-td>
-    """
 
 
 def _actions_slot() -> str:
@@ -341,7 +232,9 @@ def build_mapping_panel(
     of the old "select a row, copy its id into a box below, click
     Override" flow — the id travels with the row data internally, so
     there's nothing to copy. An "Add mapping" button opens the same style
-    of dialog for adding a source that was never auto-detected.
+    of dialog for adding a name that was never auto-detected. Only the
+    name and its mock value are ever shown or edited — the patch applies
+    to that name irrespective of what PII category it's found under.
 
     Args:
         entries: Current ledger or dictionary dicts.
@@ -360,7 +253,7 @@ def build_mapping_panel(
             "name": key,
             "label": _COLUMN_LABELS[key],
             "field": key,
-            "sortable": key != "actions",
+            "sortable": True,
             "align": "left",
         }
         for key in _DISPLAY_KEYS
@@ -376,21 +269,16 @@ def build_mapping_panel(
         source_text: str,
         source_readonly: bool,
         mock_value: str,
-        entity_type: str,
-        entity_type_readonly: bool,
-        field_role: str,
-        account_number: str,
-        info: str,
-        on_save: Callable[[str, str, str, str, str], None],
+        on_save: Callable[[str, str], None],
     ) -> None:
         with ui.dialog() as dialog, ui.card().classes(
             "bg-slate-800 text-slate-100 gap-3 min-w-[420px] max-w-[90vw]"
         ):
             ui.label(title).classes("text-lg font-semibold text-white")
             source_input = (
-                ui.input(label="Source text", value=source_text)
+                ui.input(label="Name", value=source_text)
                 .classes("w-full")
-                .props('outlined dark aria-label="Source text"')
+                .props('outlined dark aria-label="Name"')
             )
             source_input.set_enabled(not source_readonly)
             mock_input = (
@@ -398,40 +286,10 @@ def build_mapping_panel(
                 .classes("w-full")
                 .props('outlined dark aria-label="Mock value"')
             )
-            entity_select = (
-                ui.select(list(ENTITY_TYPE_OPTIONS), label="Entity type", value=entity_type or "CUSTOM")
-                .classes("w-full")
-                .props("outlined dark")
-            )
-            entity_select.set_enabled(not entity_type_readonly)
-            role_options = dict(FIELD_ROLE_OPTIONS)
-            if field_role and field_role not in role_options:
-                # Legacy/hand-edited role from before the current curated
-                # list (or after it) — show it as-is instead of silently
-                # blanking a value the row already had.
-                role_options[field_role] = field_role.replace("_", " ")
-            role_select = (
-                ui.select(role_options, label="Debit / Credit / Role", value=field_role or "")
-                .classes("w-full")
-                .props("outlined dark")
-            )
-            acct_input = (
-                ui.input(label="Account number", value=account_number)
-                .classes("w-full")
-                .props('outlined dark aria-label="Account number"')
-            )
-            if info:
-                ui.label(info).classes("text-xs text-slate-500")
 
             def _save() -> None:
                 try:
-                    on_save(
-                        source_input.value or "",
-                        mock_input.value or "",
-                        entity_select.value or "CUSTOM",
-                        role_select.value or "",
-                        acct_input.value or "",
-                    )
+                    on_save(source_input.value or "", mock_input.value or "")
                 except ValueError as exc:
                     ui.notify(str(exc), type="warning")
                     return
@@ -443,25 +301,15 @@ def build_mapping_panel(
         dialog.open()
 
     def _open_edit_dialog(row: dict) -> None:
-        def _save(_source: str, mock_value: str, _entity: str, field_role: str, account_number: str) -> None:
-            payload = parse_override(row.get("mapping_id", ""), mock_value, field_role, account_number)
+        def _save(_source: str, mock_value: str) -> None:
+            payload = parse_override(row.get("mapping_id", ""), mock_value)
             on_override(payload)
 
-        info = (
-            f"Type: {row.get('entity_type', '')} · "
-            f"Assigned: {row.get('assignment_source', '')} · "
-            f"Hits: {row.get('hit_count', 0)}"
-        )
         _open_mapping_dialog(
             title="Edit mapping",
             source_text=str(row.get("source_text", "")),
             source_readonly=True,
             mock_value=str(row.get("mock_value", "")),
-            entity_type=str(row.get("entity_type", "")),
-            entity_type_readonly=True,
-            field_role=str(row.get("field_role", "")),
-            account_number=str(row.get("account_number", "")),
-            info=info,
             on_save=_save,
         )
 
@@ -469,8 +317,8 @@ def build_mapping_panel(
         if on_create is None:
             return
 
-        def _save(source_text: str, mock_value: str, entity_type: str, field_role: str, account_number: str) -> None:
-            payload = parse_create(source_text, mock_value, entity_type, field_role, account_number)
+        def _save(source_text: str, mock_value: str) -> None:
+            payload = parse_create(source_text, mock_value)
             on_create(payload)
 
         _open_mapping_dialog(
@@ -478,11 +326,6 @@ def build_mapping_panel(
             source_text="",
             source_readonly=False,
             mock_value="",
-            entity_type="CUSTOM",
-            entity_type_readonly=False,
-            field_role="",
-            account_number="",
-            info="",
             on_save=_save,
         )
 
@@ -494,7 +337,7 @@ def build_mapping_panel(
             ui.label(
                 f"Mock value \"{row.get('mock_value', '')}\" will no longer be "
                 "recognized on future runs — a fresh auto mapping may be "
-                "created instead if the same source text reappears."
+                "created instead if the same name reappears."
             ).classes("text-sm text-slate-400 max-w-md")
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
@@ -508,12 +351,12 @@ def build_mapping_panel(
 
     with ui.column().classes("w-full gap-3 text-slate-100"):
         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
-            ui.label("Source → Mock").classes(
+            ui.label("Name → Mock").classes(
                 "text-sm font-semibold text-teal-300 uppercase tracking-wide"
             )
             with ui.row().classes("items-center gap-2"):
                 search_input = (
-                    ui.input(placeholder="Search source, mock, account…")
+                    ui.input(placeholder="Search name or mock value…")
                     .props("outlined dense dark clearable")
                     .classes("w-64")
                 )
@@ -530,7 +373,6 @@ def build_mapping_panel(
             pagination={"rowsPerPage": 15},
         ).classes("w-full bg-slate-700 text-slate-100")
         table.bind_filter_from(search_input, "value")
-        table.add_slot("body-cell-field_role", _field_role_badge_slot())
         if on_delete is not None:
             table.add_slot("body-cell-actions", _actions_slot())
             table.on("edit", lambda e: _open_edit_dialog(e.args))

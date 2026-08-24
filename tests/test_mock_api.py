@@ -29,7 +29,6 @@ def _entry(**overrides):
         "source_text": PII,
         "normalized": "standard chartered custody",
         "mock_value": "XXX",
-        "entity_type": "ORGANIZATION",
         "assignment_source": "user",
         "hit_count": 1,
         "created_at": "2026-08-19T01:00:00+00:00",
@@ -70,14 +69,11 @@ def _assert_logs_omit_pii(caplog) -> None:
         assert PII not in str(record.args)
 
 
-def _upsert_call(store) -> tuple[str | None, str | None, str | None]:
+def _upsert_call(store) -> tuple[str | None, str | None]:
     args, kwargs = store.upsert.call_args
     source = kwargs.get("source_text", args[0] if len(args) > 0 else None)
     mock_value = kwargs.get("mock_value", args[1] if len(args) > 1 else None)
-    entity_type = kwargs.get(
-        "entity_type", args[2] if len(args) > 2 else None
-    )
-    return source, mock_value, entity_type
+    return source, mock_value
 
 
 # --- Task 1 helper unit tests -------------------------------------------------
@@ -89,7 +85,6 @@ def test_as_dict_from_mapping():
         source_text=PII,
         normalized="standard chartered custody",
         mock_value="XXX",
-        entity_type="ORGANIZATION",
         assignment_source="user",
         hit_count=1,
         created_at="2026-08-19T01:00:00+00:00",
@@ -100,7 +95,6 @@ def test_as_dict_from_mapping():
     assert result["source_text"] == PII
     assert result["normalized"] == "standard chartered custody"
     assert result["mock_value"] == "XXX"
-    assert result["entity_type"] == "ORGANIZATION"
     assert result["assignment_source"] == "user"
     assert result["hit_count"] == 1
 
@@ -153,23 +147,6 @@ def test_list_mocks_200_when_auth_disabled():
     assert body["entries"][0]["mock_value"] == "XXX"
 
 
-def test_list_mocks_filters_entity_type():
-    store = MagicMock()
-    store.list.return_value = [
-        _entry(mapping_id="map_org", entity_type="ORGANIZATION"),
-        _entry(mapping_id="map_per", entity_type="PERSON", mock_value="NAME_A"),
-    ]
-    client, _, _ = make_client(store=store)
-
-    response = client.get("/v1/mocks", params={"entity_type": "PERSON"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["count"] == 1
-    assert body["entries"][0]["entity_type"] == "PERSON"
-    assert body["entries"][0]["mapping_id"] == "map_per"
-
-
 def test_post_mocks_201_new():
     client, store, _ = make_client()
     store.list.return_value = []
@@ -177,20 +154,15 @@ def test_post_mocks_201_new():
 
     response = client.post(
         "/v1/mocks",
-        json={
-            "source_text": PII,
-            "mock_value": "XXX",
-            "entity_type": "ORGANIZATION",
-        },
+        json={"source_text": PII, "mock_value": "XXX"},
     )
 
     assert response.status_code == 201
     assert response.json()["mapping_id"] == "map_00a"
     store.upsert.assert_called_once()
-    source, mock_value, entity_type = _upsert_call(store)
+    source, mock_value = _upsert_call(store)
     assert source == PII
     assert mock_value == "XXX"
-    assert entity_type == "ORGANIZATION"
 
 
 def test_post_mocks_200_existing():
@@ -200,30 +172,11 @@ def test_post_mocks_200_existing():
 
     response = client.post(
         "/v1/mocks",
-        json={
-            "source_text": PII,
-            "mock_value": "XXX",
-            "entity_type": "ORGANIZATION",
-        },
+        json={"source_text": PII, "mock_value": "XXX"},
     )
 
     assert response.status_code == 200
     store.upsert.assert_called_once()
-
-
-def test_post_mocks_default_entity_type_custom():
-    client, store, _ = make_client()
-    store.list.return_value = []
-
-    response = client.post(
-        "/v1/mocks",
-        json={"source_text": PII, "mock_value": "XXX"},
-    )
-
-    assert response.status_code == 201
-    store.upsert.assert_called_once()
-    _, _, entity_type = _upsert_call(store)
-    assert entity_type == "CUSTOM"
 
 
 def test_put_override_200():
@@ -234,9 +187,7 @@ def test_put_override_200():
 
     assert response.status_code == 200
     assert response.json()["mock_value"] == "BANK_A"
-    store.override.assert_called_once_with(
-        "map_00a", "BANK_A", field_role=None, account_number=None
-    )
+    store.override.assert_called_once_with("map_00a", "BANK_A")
 
 
 def test_put_unknown_mapping_404():

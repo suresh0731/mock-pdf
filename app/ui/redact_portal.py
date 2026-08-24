@@ -82,37 +82,15 @@ def _pdf_viewer_html(
 
 
 def persist_mapping_override(store: Any, payload: dict[str, Any]) -> Any:
-    """Apply a mapping-table edit (mock value + optional role/account)."""
-    cleaned = parse_override(
-        payload["mapping_id"],
-        payload["mock_value"],
-        payload.get("field_role"),
-        payload.get("account_number"),
-    )
-    return store.override(
-        cleaned["mapping_id"],
-        cleaned["mock_value"],
-        field_role=cleaned.get("field_role"),
-        account_number=cleaned.get("account_number"),
-    )
+    """Apply a mapping-table edit (mock value only)."""
+    cleaned = parse_override(payload["mapping_id"], payload["mock_value"])
+    return store.override(cleaned["mapping_id"], cleaned["mock_value"])
 
 
 def persist_mapping_create(store: Any, payload: dict[str, Any]) -> Any:
     """Add a brand-new mapping from the mapping panel's "Add mapping" dialog."""
-    cleaned = parse_create(
-        payload["source_text"],
-        payload["mock_value"],
-        payload.get("entity_type", "CUSTOM"),
-        payload.get("field_role"),
-        payload.get("account_number"),
-    )
-    return store.upsert(
-        cleaned["source_text"],
-        cleaned["mock_value"],
-        cleaned["entity_type"],
-        account_number=cleaned.get("account_number"),
-        field_role=cleaned.get("field_role"),
-    )
+    cleaned = parse_create(payload["source_text"], payload["mock_value"])
+    return store.upsert(cleaned["source_text"], cleaned["mock_value"])
 
 
 def _ocr_engine_options() -> dict[str, str]:

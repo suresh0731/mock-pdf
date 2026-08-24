@@ -44,8 +44,7 @@ def test_mock_entry_roundtrip_json() -> None:
         mapping_id="map_abcd1234",
         source_text=_SOURCE,
         normalized=_SOURCE_NORMALIZED,
-        mock_value="ORG_01",
-        entity_type="ORGANIZATION",
+        mock_value="MOCK_01",
         assignment_source="auto",
         hit_count=1,
         created_at=now,
@@ -54,9 +53,8 @@ def test_mock_entry_roundtrip_json() -> None:
     restored = MockEntry.model_validate_json(entry.model_dump_json())
     assert restored.source_text == _SOURCE
     assert restored.normalized == _SOURCE_NORMALIZED
-    assert restored.mock_value == "ORG_01"
+    assert restored.mock_value == "MOCK_01"
     assert restored.mapping_id == "map_abcd1234"
-    assert restored.entity_type == "ORGANIZATION"
     assert restored.assignment_source == "auto"
     assert restored.hit_count == 1
 
@@ -86,12 +84,12 @@ def test_mapping_not_found_exposes_code() -> None:
     assert _SOURCE_NORMALIZED not in message
 
 
-def test_resolve_assigns_deterministic_org_mock_for_unseen_organization(
+def test_resolve_assigns_deterministic_mock_for_unseen_name(
     store: MockDictionaryStore,
 ) -> None:
-    entry = store.resolve(_SOURCE, "ORGANIZATION")
-    assert entry.mock_value == deterministic_auto_mock_value("ORGANIZATION", _SOURCE_NORMALIZED)
-    assert entry.mock_value.startswith("ORG_")
+    entry = store.resolve(_SOURCE)
+    assert entry.mock_value == deterministic_auto_mock_value(_SOURCE_NORMALIZED)
+    assert entry.mock_value.startswith("MOCK_")
     assert entry.assignment_source == "auto"
     assert entry.hit_count == 1
     assert entry.normalized == _SOURCE_NORMALIZED
@@ -103,78 +101,48 @@ def test_resolve_assigns_deterministic_org_mock_for_unseen_organization(
 def test_resolve_reuses_mapping_when_casing_and_spaces_differ(
     store: MockDictionaryStore,
 ) -> None:
-    first = store.resolve(_SOURCE, "ORGANIZATION")
-    second = store.resolve("  STANDARD   chartered  custody ", "ORGANIZATION")
+    first = store.resolve(_SOURCE)
+    second = store.resolve("  STANDARD   chartered  custody ")
     assert second.mapping_id == first.mapping_id
     assert second.mock_value == first.mock_value
     assert second.hit_count == 2
 
 
+def test_resolve_applies_irrespective_of_pii_category(
+    store: MockDictionaryStore,
+) -> None:
+    """The store has no notion of category — resolve() doesn't even take
+    one, so the same patch applies no matter what a caller would have
+    called the span."""
+    first = store.resolve(_SOURCE)
+    second = store.resolve(_SOURCE)
+    assert second.mapping_id == first.mapping_id
+    assert second.mock_value == first.mock_value
+
+
 def test_resolve_user_mock_sets_assignment_source_user(store: MockDictionaryStore) -> None:
-    store.resolve(_SOURCE, "ORGANIZATION")
-    updated = store.resolve(_SOURCE, "ORGANIZATION", user_mock="XXX")
+    store.resolve(_SOURCE)
+    updated = store.resolve(_SOURCE, user_mock="XXX")
     assert updated.mock_value == "XXX"
     assert updated.assignment_source == "user"
 
 
 def test_override_updates_mock_value(store: MockDictionaryStore) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION")
+    created = store.resolve(_SOURCE)
     updated = store.override(created.mapping_id, "BANK_A")
     assert updated.mapping_id == created.mapping_id
     assert updated.mock_value == "BANK_A"
     assert updated.assignment_source == "user"
 
 
-def test_override_sets_field_role_and_account_number(store: MockDictionaryStore) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION")
-    updated = store.override(
-        created.mapping_id, "BANK_A", field_role="bank_name", account_number="123456"
-    )
-    assert updated.field_role == "bank_name"
-    assert updated.account_number == "123456"
-    # The new account number is indexed for account-priority lookups.
-    via_account = store.resolve("typo'd name", "ORGANIZATION", account_number="123456")
-    assert via_account.mapping_id == created.mapping_id
-
-
-def test_override_omitted_field_role_and_account_leave_them_untouched(
-    store: MockDictionaryStore,
-) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION", account_number="111", field_role="bank_name")
-    updated = store.override(created.mapping_id, "BANK_A")
-    assert updated.field_role == "bank_name"
-    assert updated.account_number == "111"
-
-
-def test_override_empty_string_clears_field_role_and_account_number(
-    store: MockDictionaryStore,
-) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION", account_number="111", field_role="bank_name")
-    updated = store.override(created.mapping_id, "BANK_A", field_role="", account_number="")
-    assert updated.field_role is None
-    assert updated.account_number is None
-    # Old account number no longer resolves to this mapping.
-    fresh = store.resolve("Totally Different Org", "ORGANIZATION", account_number="111")
-    assert fresh.mapping_id != created.mapping_id
-
-
-def test_override_account_number_change_drops_old_index_entry(
-    store: MockDictionaryStore,
-) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION", account_number="111")
-    store.override(created.mapping_id, "BANK_A", account_number="222")
-    fresh = store.resolve("Totally Different Org", "ORGANIZATION", account_number="111")
-    assert fresh.mapping_id != created.mapping_id
-
-
 def test_new_store_reuses_snapshot_mock_not_new_counter(tmp_path: Path) -> None:
     snapshot = tmp_path / "mappings.json"
     store_a = MockDictionaryStore(snapshot_path=snapshot)
-    first = store_a.resolve(_SOURCE, "ORGANIZATION")
+    first = store_a.resolve(_SOURCE)
     store_b = MockDictionaryStore(snapshot_path=snapshot)
-    reused = store_b.resolve(_SOURCE, "ORGANIZATION")
+    reused = store_b.resolve(_SOURCE)
     assert reused.mapping_id == first.mapping_id
-    assert reused.mock_value == deterministic_auto_mock_value("ORGANIZATION", _SOURCE_NORMALIZED)
+    assert reused.mock_value == deterministic_auto_mock_value(_SOURCE_NORMALIZED)
 
 
 def test_deterministic_mock_value_same_across_independent_stores(tmp_path: Path) -> None:
@@ -185,17 +153,17 @@ def test_deterministic_mock_value_same_across_independent_stores(tmp_path: Path)
     store_b = MockDictionaryStore(snapshot_path=tmp_path / "b.json")
     # store_a resolves an unrelated value first, simulating a different
     # "run history" than store_b — must not affect store_b's result.
-    store_a.resolve("Acme Holdings", "ORGANIZATION")
-    entry_a = store_a.resolve(_SOURCE, "ORGANIZATION")
-    entry_b = store_b.resolve(_SOURCE, "ORGANIZATION")
+    store_a.resolve("Acme Holdings")
+    entry_a = store_a.resolve(_SOURCE)
+    entry_b = store_b.resolve(_SOURCE)
     assert entry_a.mock_value == entry_b.mock_value
-    assert entry_a.mock_value == deterministic_auto_mock_value("ORGANIZATION", _SOURCE_NORMALIZED)
+    assert entry_a.mock_value == deterministic_auto_mock_value(_SOURCE_NORMALIZED)
 
 
 def test_delete_then_resolve_recovers_same_deterministic_mock(store: MockDictionaryStore) -> None:
-    first = store.resolve(_SOURCE, "ORGANIZATION")
+    first = store.resolve(_SOURCE)
     store.delete(first.mapping_id)
-    second = store.resolve(_SOURCE, "ORGANIZATION")
+    second = store.resolve(_SOURCE)
     assert second.mapping_id != first.mapping_id
     assert second.mock_value == first.mock_value
     ids = {row.mapping_id for row in store.list()}
@@ -225,7 +193,7 @@ def test_resolve_empty_source_raises_validation_error(
     snapshot = tmp_path / "mappings.json"
     for empty in ("", "   "):
         with pytest.raises(MockValidationError) as exc_info:
-            store.resolve(empty, "ORGANIZATION")
+            store.resolve(empty)
         assert exc_info.value.field == "source_text"
         assert exc_info.value.reason == "empty"
         assert empty.strip() not in str(exc_info.value) or empty.strip() == ""
@@ -250,21 +218,15 @@ def test_upsert_blank_mock_raises_validation_error(store: MockDictionaryStore) -
 
 
 def test_upsert_creates_user_assignment(store: MockDictionaryStore) -> None:
-    entry = store.upsert("Acme Corp", "XXX", "ORGANIZATION")
+    entry = store.upsert("Acme Corp", "XXX")
     assert entry.assignment_source == "user"
     assert entry.mock_value == "XXX"
 
 
-def test_prefix_person_uses_person_prefix(store: MockDictionaryStore) -> None:
-    entry = store.resolve("Dian Wicaksono", "PERSON")
-    assert entry.mock_value == deterministic_auto_mock_value("PERSON", "dian wicaksono")
-    assert entry.mock_value.startswith("PERSON_")
-
-
-def test_prefix_unknown_uses_first_eight(store: MockDictionaryStore) -> None:
-    entry = store.resolve("x", "NATIONAL_ID")
-    assert entry.mock_value.startswith("NATIONAL_")
-    assert entry.mock_value == deterministic_auto_mock_value("NATIONAL_ID", "x")
+def test_auto_mock_uses_generic_prefix_regardless_of_name(store: MockDictionaryStore) -> None:
+    entry = store.resolve("Dian Wicaksono")
+    assert entry.mock_value == deterministic_auto_mock_value("dian wicaksono")
+    assert entry.mock_value.startswith("MOCK_")
 
 
 def test_normalize_source_casefold_and_whitespace() -> None:
@@ -272,23 +234,23 @@ def test_normalize_source_casefold_and_whitespace() -> None:
 
 
 def test_list_returns_copies(store: MockDictionaryStore) -> None:
-    created = store.resolve(_SOURCE, "ORGANIZATION")
+    created = store.resolve(_SOURCE)
     rows = store.list()
     assert len(rows) == 1
     rows[0].mock_value = "MUTATED"
     again = store.list()
     assert again[0].mock_value == created.mock_value
-    assert again[0].mock_value == deterministic_auto_mock_value("ORGANIZATION", _SOURCE_NORMALIZED)
+    assert again[0].mock_value == deterministic_auto_mock_value(_SOURCE_NORMALIZED)
 
 
 def test_dictionary_logs_omit_source_text(
     store: MockDictionaryStore, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.DEBUG):
-        created = store.resolve(_SOURCE, "ORGANIZATION")
-        store.resolve(_SOURCE, "ORGANIZATION", user_mock="XXX")
+        created = store.resolve(_SOURCE)
+        store.resolve(_SOURCE, user_mock="XXX")
         store.override(created.mapping_id, "BANK_A")
-        store.upsert("Acme Corp", "YYY", "ORGANIZATION")
+        store.upsert("Acme Corp", "YYY")
         store.delete(created.mapping_id)
     assert_no_pii_in_logs(caplog.text, _SOURCE)
     assert_no_pii_in_logs(caplog.text, _SOURCE_NORMALIZED)
@@ -304,93 +266,46 @@ def test_gitignore_excludes_mock_dictionary_path() -> None:
 def test_mock_mock_dictionary_has_no_snapshot_io(tmp_path: Path) -> None:
     before = {p.name for p in tmp_path.iterdir()}
     double = MockMockDictionary()
-    entry = double.resolve("A", "PERSON")
-    assert entry.mock_value == deterministic_auto_mock_value("PERSON", "a")
+    entry = double.resolve("A")
+    assert entry.mock_value == deterministic_auto_mock_value("a")
     after = {p.name for p in tmp_path.iterdir()}
     assert after == before
 
 
-# --- Account-number priority + fuzzy fallback (Field-Anchored redesign) ----
-
-
-def test_resolve_reuses_mapping_by_account_number_despite_name_drift(
-    store: MockDictionaryStore,
-) -> None:
-    """A stable account number wins even when the OCR'd name is unrecognizable."""
-    first = store.resolve(
-        "Reksa Dana Bahana Primavera 99",
-        "ORGANIZATION",
-        account_number="11002345",
-        field_role="debit_account_name",
-    )
-    second = store.resolve(
-        "R3ksa Oana 8ahana Prim@vera",  # heavily OCR-mangled, low similarity
-        "ORGANIZATION",
-        account_number="11002345",
-        field_role="debit_account_name",
-    )
-    assert second.mapping_id == first.mapping_id
-    assert second.mock_value == first.mock_value
-    assert second.hit_count == 2
-
-
-def test_resolve_account_number_updates_existing_entry_account_number(
-    store: MockDictionaryStore,
-) -> None:
-    first = store.resolve(_SOURCE, "ORGANIZATION")
-    updated = store.resolve(_SOURCE, "ORGANIZATION", account_number="99887766")
-    assert updated.mapping_id == first.mapping_id
-    assert updated.account_number == "99887766"
+# --- Fuzzy matching applies irrespective of PII category ------------------
 
 
 def test_resolve_fuzzy_matches_ocr_variant_within_threshold(
     store: MockDictionaryStore,
 ) -> None:
-    first = store.resolve(_SOURCE, "ORGANIZATION", field_role="bank_name")
+    first = store.resolve(_SOURCE)
     # ratio to _SOURCE ~0.85, clears the default 0.85 threshold.
-    second = store.resolve("Stan Chartered Custdn", "ORGANIZATION", field_role="bank_name")
+    second = store.resolve("Stan Chartered Custdn")
     assert second.mapping_id == first.mapping_id
     assert second.hit_count == 2
 
 
-def test_resolve_fuzzy_match_scoped_to_same_entity_type(
+def test_resolve_fuzzy_match_not_scoped_by_any_category(
     store: MockDictionaryStore,
 ) -> None:
-    org_entry = store.resolve(_SOURCE, "ORGANIZATION")
-    # A near-identical OCR variant (not an exact-normalized match) of an
-    # ORGANIZATION entry must not be reused for a PERSON lookup.
-    person_entry = store.resolve("Standard Chartered Custdy", "PERSON")
-    assert person_entry.mapping_id != org_entry.mapping_id
-    assert person_entry.mock_value == deterministic_auto_mock_value(
-        "PERSON", normalize_source("Standard Chartered Custdy")
-    )
-    assert person_entry.mock_value.startswith("PERSON_")
-
-
-def test_resolve_fuzzy_match_scoped_to_same_field_role_when_both_set(
-    store: MockDictionaryStore,
-) -> None:
-    debit_entry = store.resolve(
-        "PT BNI Life Insurance", "ORGANIZATION", field_role="debit_account_name"
-    )
-    # ratio to the debit text ~0.93, clears the default threshold, but the
-    # differing field_role must still force a separate mapping.
-    credit_entry = store.resolve(
-        "PT BNI Llfe Insurnce", "ORGANIZATION", field_role="credit_account_name"
-    )
-    assert credit_entry.mapping_id != debit_entry.mapping_id
+    """There is no entity_type/field_role concept at all any more — a
+    near-identical OCR variant always collapses onto the existing
+    mapping, whatever category a caller might have detected either
+    span under."""
+    first_entry = store.resolve(_SOURCE)
+    # A near-identical OCR variant (not an exact-normalized match).
+    second_entry = store.resolve("Standard Chartered Custdy")
+    assert second_entry.mapping_id == first_entry.mapping_id
 
 
 def test_resolve_unrelated_text_below_threshold_gets_new_entry(
     store: MockDictionaryStore,
 ) -> None:
-    first = store.resolve(_SOURCE, "ORGANIZATION")
-    second = store.resolve("PT BNI Life Insurance", "ORGANIZATION")
+    first = store.resolve(_SOURCE)
+    second = store.resolve("PT BNI Life Insurance")
     assert second.mapping_id != first.mapping_id
     assert second.mock_value != first.mock_value
-    assert second.mock_value == deterministic_auto_mock_value(
-        "ORGANIZATION", "pt bni life insurance"
-    )
+    assert second.mock_value == deterministic_auto_mock_value("pt bni life insurance")
 
 
 def test_resolve_fuzzy_threshold_is_configurable(tmp_path: Path) -> None:
@@ -399,15 +314,15 @@ def test_resolve_fuzzy_threshold_is_configurable(tmp_path: Path) -> None:
     strict_store = MockDictionaryStore(
         snapshot_path=tmp_path / "strict.json", fuzzy_threshold=0.85
     )
-    strict_first = strict_store.resolve(_SOURCE, "ORGANIZATION")
-    strict_second = strict_store.resolve(variant, "ORGANIZATION")
+    strict_first = strict_store.resolve(_SOURCE)
+    strict_second = strict_store.resolve(variant)
     assert strict_second.mapping_id != strict_first.mapping_id
 
     lenient_store = MockDictionaryStore(
         snapshot_path=tmp_path / "lenient.json", fuzzy_threshold=0.7
     )
-    lenient_first = lenient_store.resolve(_SOURCE, "ORGANIZATION")
-    lenient_second = lenient_store.resolve(variant, "ORGANIZATION")
+    lenient_first = lenient_store.resolve(_SOURCE)
+    lenient_second = lenient_store.resolve(variant)
     assert lenient_second.mapping_id == lenient_first.mapping_id
 
 
@@ -425,37 +340,28 @@ def test_find_prefix_collisions_flags_truncated_subset(store: MockDictionaryStor
     0.85 threshold), which is exactly the ambiguity this function exists
     to flag rather than silently resolve.
     """
-    short_entry = store.upsert("Blife Link Saham Maksima", "ORG_SHORT", "ORGANIZATION")
-    long_entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG", "ORGANIZATION")
+    short_entry = store.upsert("Blife Link Saham Maksima", "ORG_SHORT")
+    long_entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG")
 
-    collisions = store.find_prefix_collisions("blife link saham maksima", "ORGANIZATION")
+    collisions = store.find_prefix_collisions("blife link saham maksima")
     assert {c.mapping_id for c in collisions} == {long_entry.mapping_id}
 
-    collisions_reverse = store.find_prefix_collisions(
-        "blife link saham maksima plus", "ORGANIZATION"
-    )
+    collisions_reverse = store.find_prefix_collisions("blife link saham maksima plus")
     assert {c.mapping_id for c in collisions_reverse} == {short_entry.mapping_id}
 
 
 def test_find_prefix_collisions_empty_when_no_containment_relationship(
     store: MockDictionaryStore,
 ) -> None:
-    store.upsert(_SOURCE, "BANK_A", "ORGANIZATION")
-    store.upsert("PT BNI Life Insurance", "ORG_B", "ORGANIZATION")
-    assert store.find_prefix_collisions("standard chartered custody", "ORGANIZATION") == []
-
-
-def test_find_prefix_collisions_scoped_to_same_entity_type(store: MockDictionaryStore) -> None:
-    store.upsert("Blife Link Saham Maksima Plus", "PERSON_X", "PERSON")
-    # Same containment relationship, but a different entity_type — must
-    # not be flagged as a collision across types.
-    assert store.find_prefix_collisions("blife link saham maksima", "ORGANIZATION") == []
+    store.upsert(_SOURCE, "BANK_A")
+    store.upsert("PT BNI Life Insurance", "ORG_B")
+    assert store.find_prefix_collisions("standard chartered custody") == []
 
 
 def test_find_prefix_collisions_excludes_given_mapping_id(store: MockDictionaryStore) -> None:
-    entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG", "ORGANIZATION")
+    entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG")
     collisions = store.find_prefix_collisions(
-        "blife link saham maksima", "ORGANIZATION", exclude_mapping_id=entry.mapping_id
+        "blife link saham maksima", exclude_mapping_id=entry.mapping_id
     )
     assert collisions == []
 
@@ -463,8 +369,8 @@ def test_find_prefix_collisions_excludes_given_mapping_id(store: MockDictionaryS
 def test_find_prefix_collisions_blank_normalized_returns_empty(
     store: MockDictionaryStore,
 ) -> None:
-    store.upsert(_SOURCE, "BANK_A", "ORGANIZATION")
-    assert store.find_prefix_collisions("", "ORGANIZATION") == []
+    store.upsert(_SOURCE, "BANK_A")
+    assert store.find_prefix_collisions("") == []
 
 
 def test_resolve_logs_prefix_collision_warning_without_leaking_text(
@@ -476,11 +382,11 @@ def test_resolve_logs_prefix_collision_warning_without_leaking_text(
     matching entirely) still gets flagged as ambiguous against the longer
     one still on file.
     """
-    short_entry = store.upsert("Blife Link Saham Maksima", "ORG_SHORT", "ORGANIZATION")
-    long_entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG", "ORGANIZATION")
+    short_entry = store.upsert("Blife Link Saham Maksima", "ORG_SHORT")
+    long_entry = store.upsert("Blife Link Saham Maksima Plus", "ORG_LONG")
 
     with caplog.at_level(logging.WARNING):
-        resolved = store.resolve("Blife Link Saham Maksima", "ORGANIZATION")
+        resolved = store.resolve("Blife Link Saham Maksima")
     assert resolved.mapping_id == short_entry.mapping_id
 
     assert "mock_prefix_collision_detected" in caplog.text
@@ -492,7 +398,7 @@ def test_resolve_logs_prefix_collision_warning_without_leaking_text(
 def test_resolve_no_collision_warning_for_unrelated_entries(
     store: MockDictionaryStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store.resolve(_SOURCE, "ORGANIZATION")
+    store.resolve(_SOURCE)
     with caplog.at_level(logging.WARNING):
-        store.resolve("PT BNI Life Insurance", "ORGANIZATION")
+        store.resolve("PT BNI Life Insurance")
     assert "mock_prefix_collision_detected" not in caplog.text

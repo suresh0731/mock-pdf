@@ -279,8 +279,6 @@ def _build_window_candidates(
 def _resolve_maximal_munch_window(
     matched_words: list[EnsembleWord],
     ensemble_words: list[EnsembleWord],
-    entity_type: str,
-    field_role: str | None,
     mock_store: MockDictionaryStoreProtocol,
     *,
     margin: float = _LOOKAHEAD_DECISIVE_MARGIN,
@@ -313,7 +311,7 @@ def _resolve_maximal_munch_window(
     for window in windows:
         text = " ".join(w.text for w in window)
         normalized = normalize_source(text)
-        ratio = mock_store.best_match_score(normalized, entity_type, field_role) if normalized else 0.0
+        ratio = mock_store.best_match_score(normalized) if normalized else 0.0
         scored.append((window, text, ratio))
 
     best_ratio = max(ratio for _, _, ratio in scored)
@@ -715,7 +713,7 @@ class RedactPipeline:
             if user_mock is None:
                 continue
             try:
-                self.mock_store.upsert(term.search_value, user_mock, "CUSTOM")
+                self.mock_store.upsert(term.search_value, user_mock)
             except MockValidationError:
                 continue
 
@@ -772,7 +770,7 @@ class RedactPipeline:
                 for start, end in find_term_spans(merged_text, term.search_value):
                     spans.append(_SpanCandidate(start, end, "CUSTOM", 0.95, term, None, None))
 
-            for start, end, entity_type, score, term, field_role, account_number, cand_words in spans:
+            for start, end, entity_type, score, term, _field_role, _account_number, cand_words in spans:
                 if cand_words:
                     # Field-anchored candidate: geometry/text come straight from
                     # the words the extractor matched, not from start/end — a
@@ -798,10 +796,10 @@ class RedactPipeline:
                     # _resolve_maximal_munch_window).
                     normalized_candidate = normalize_source(source_text)
                     if normalized_candidate and self.mock_store.find_prefix_collisions(
-                        normalized_candidate, entity_type
+                        normalized_candidate
                     ):
                         matched_words, source_text = _resolve_maximal_munch_window(
-                            matched_words, ensemble_words, entity_type, field_role, self.mock_store
+                            matched_words, ensemble_words, self.mock_store
                         )
                         bbox = union_bbox(matched_words)
 
@@ -839,30 +837,19 @@ class RedactPipeline:
                 if term is None and self.settings.restrict_to_known_mappings:
                     # Field-anchored/Presidio candidate under restricted mode:
                     # only paint it if it already matches the curated
-                    # dictionary (exact, account-number, or trusted fuzzy) —
-                    # never auto-create a new entry for unseen text. Explicit
+                    # dictionary (exact or trusted fuzzy) — never
+                    # auto-create a new entry for unseen text. Explicit
                     # custom redaction terms (term is not None) are a direct
                     # user instruction and always resolve/create regardless.
-                    entry = self.mock_store.lookup(
-                        source_text,
-                        entity_type,
-                        account_number=account_number,
-                        field_role=field_role,
-                    )
+                    entry = self.mock_store.lookup(source_text)
                     if entry is None:
                         continue
                 else:
-                    entry = self.mock_store.resolve(
-                        source_text,
-                        entity_type,
-                        user_mock=user_mock,
-                        account_number=account_number,
-                        field_role=field_role,
-                    )
+                    entry = self.mock_store.resolve(source_text, user_mock=user_mock)
                 logger.info(
                     "mock_resolve mapping_id=%s entity_type=%s assignment_source=%s",
                     entry.mapping_id,
-                    entry.entity_type,
+                    entity_type,
                     entry.assignment_source,
                 )
 

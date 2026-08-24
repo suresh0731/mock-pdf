@@ -1,11 +1,8 @@
 """CSV import/export for the mock dictionary.
 
 Lets QA download the current mappings, edit them in Excel, and re-upload —
-and lets anyone pre-seed known custodian/bank/account names via the exact
-same file shape, so a "template" is just this file with some rows filled in
-and ``account_number`` left blank where an entity has no associated account
-(e.g. a bank or counterparty org named only by a label, not a numbered
-account).
+and lets anyone pre-seed known names via the exact same file shape, so a
+"template" is just this file with some rows filled in.
 
 Upload never clobbers an existing mapping (see ``seed_loader.insert_new_rows``)
 — a row whose ``source_text`` already has a mapping is skipped, not
@@ -21,38 +18,14 @@ from typing import Any
 from app.models.mock import MockDictionaryStoreProtocol
 from app.services.pii.seed_loader import InsertRowsResult, insert_new_rows
 
-EXPORT_COLUMNS: tuple[str, ...] = (
-    "source_text",
-    "mock_value",
-    "entity_type",
-    "field_role",
-    "account_number",
-    "mapping_id",
-    "assignment_source",
-    "hit_count",
-)
-
-# Only these columns are read back on upload — the rest of EXPORT_COLUMNS
-# are informational (mapping_id/assignment_source/hit_count are ignored if
-# present, and not required if absent), so a downloaded mappings file and a
-# from-scratch template are interchangeable on re-upload.
-TEMPLATE_COLUMNS: tuple[str, ...] = (
-    "source_text",
-    "mock_value",
-    "entity_type",
-    "field_role",
-    "account_number",
-)
+# Just the name and its mock value — matching applies to a source text
+# irrespective of any PII category, so there is nothing else to tag.
+EXPORT_COLUMNS: tuple[str, ...] = ("source_text", "mock_value")
+TEMPLATE_COLUMNS: tuple[str, ...] = ("source_text", "mock_value")
 
 _TEMPLATE_EXAMPLE_ROWS: tuple[tuple[str, ...], ...] = (
-    ("Standard Chartered Custody", "CUSTODIAN_A", "ORGANIZATION", "bank_name", ""),
-    (
-        "Reksa Dana Bahana Primavera 99",
-        "FUND_A",
-        "ORGANIZATION",
-        "debit_account_name",
-        "11002345",
-    ),
+    ("Standard Chartered Custody", "CUSTODIAN_A"),
+    ("Reksa Dana Bahana Primavera 99", "FUND_A"),
 )
 
 
@@ -97,8 +70,7 @@ def import_mappings_csv(
     Args:
         store: Target mock dictionary store.
         csv_text: Raw CSV file contents. Must have a header row containing
-            at least ``source_text`` and ``mock_value``; ``entity_type``,
-            ``field_role``, and ``account_number`` are optional per row.
+            at least ``source_text`` and ``mock_value``.
 
     Returns:
         Counts of inserted vs. skipped (existing mapping vs. malformed row).

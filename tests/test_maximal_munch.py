@@ -32,7 +32,7 @@ class _FakeStore:
     def __init__(self, scores: dict[str, float]):
         self._scores = scores
 
-    def best_match_score(self, normalized: str, entity_type: str, field_role: str | None = None) -> float:
+    def best_match_score(self, normalized: str) -> float:
         return self._scores.get(normalized, 0.0)
 
 
@@ -123,9 +123,7 @@ def test_resolve_prefers_longer_window_within_margin():
     maksima = _word("Maksima", 0, 20)
     plus = _word("Plus", 100, 20)
     store = _FakeStore({"maksima": 0.8, "maksima plus": 1.0})
-    words, text = _resolve_maximal_munch_window(
-        [maksima], [maksima, plus], "ORG", None, store
-    )
+    words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
     assert text == "Maksima Plus"
     assert words == [maksima, plus]
 
@@ -134,9 +132,7 @@ def test_resolve_picks_decisively_better_shorter_window_over_longer():
     maksima = _word("Maksima", 0, 20)
     plus = _word("Plus", 100, 20)
     store = _FakeStore({"maksima": 1.0, "maksima plus": 0.5})
-    words, text = _resolve_maximal_munch_window(
-        [maksima], [maksima, plus], "ORG", None, store
-    )
+    words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
     assert text == "Maksima"
     assert words == [maksima]
 
@@ -145,13 +141,13 @@ def test_resolve_drops_spurious_trailing_word_via_trim():
     a = _word("A", 0, 20)
     b = _word("B", 40, 20)
     store = _FakeStore({"a b": 0.4, "a": 0.95})
-    words, text = _resolve_maximal_munch_window([a, b], [a, b], "ORG", None, store)
+    words, text = _resolve_maximal_munch_window([a, b], [a, b], store)
     assert text == "A"
     assert words == [a]
 
 
 def test_resolve_falls_back_to_original_when_no_windows():
-    words, text = _resolve_maximal_munch_window([], [], "ORG", None, _FakeStore({}))
+    words, text = _resolve_maximal_munch_window([], [], _FakeStore({}))
     assert words == []
     assert text == ""
 
@@ -160,7 +156,5 @@ def test_resolve_ties_break_toward_longer_window():
     maksima = _word("Maksima", 0, 20)
     plus = _word("Plus", 100, 20)
     store = _FakeStore({"maksima": 1.0, "maksima plus": 1.0})
-    words, text = _resolve_maximal_munch_window(
-        [maksima], [maksima, plus], "ORG", None, store
-    )
+    words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
     assert text == "Maksima Plus"

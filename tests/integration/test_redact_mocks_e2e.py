@@ -45,7 +45,7 @@ ORG_START = MERGED.find(ORG)
 ORG_END = ORG_START + len(ORG)
 PERSON_START = MERGED.find(PERSON)
 PERSON_END = PERSON_START + len(PERSON)
-PERSON_RE = re.compile(r"PERSON_[0-9A-F]{2,}")
+MOCK_RE = re.compile(r"MOCK_[0-9A-F]{2,}")
 
 
 def _contains_key(payload: object, key: str) -> bool:
@@ -252,7 +252,7 @@ def test_pipeline_unseen_person_gets_person_nn(tmp_path, monkeypatch, patch_ocr_
     pipeline, store, _ = _pipeline(tmp_path, monkeypatch)
     _, audit, _ = _run(pipeline)
     person = _person_region(audit)
-    assert PERSON_RE.fullmatch(person.mock_value)
+    assert MOCK_RE.fullmatch(person.mock_value)
     assert any(e.mock_value == person.mock_value for e in store.list())
 
 
@@ -314,7 +314,7 @@ def test_pipeline_custom_default_label_is_not_user_override(tmp_path, monkeypatc
     custom = next(r for r in audit.redactions if r.entity_type == "CUSTOM")
     assert custom.assignment_source == "auto"
     assert custom.mock_value != "CUSTOM"
-    assert custom.mock_value.startswith("CUSTOM_")
+    assert MOCK_RE.fullmatch(custom.mock_value)
     row = next(e for e in store.list() if e.source_text == ORG)
     assert row.assignment_source == "auto"
 
@@ -475,7 +475,7 @@ def test_e2e_person_auto_person_nn(wired_app):
     response = _post_redact(client)
     audit = client.get(f"/v1/redact/audit/{response.headers['X-Request-Id']}").json()
     person = next(r for r in audit["redactions"] if r["entity_type"] == "PERSON")
-    assert PERSON_RE.fullmatch(person["mock_value"])
+    assert MOCK_RE.fullmatch(person["mock_value"])
 
 
 def test_e2e_default_logo_footer_zones(wired_app):
@@ -567,7 +567,7 @@ def test_e2e_download_template_returns_csv_with_examples(wired_app):
     assert response.headers["content-type"].startswith("text/csv")
     assert "mock-mappings-template.csv" in response.headers["content-disposition"]
     lines = response.text.splitlines()
-    assert lines[0] == "source_text,mock_value,entity_type,field_role,account_number"
+    assert lines[0] == "source_text,mock_value"
     assert len(lines) >= 3
 
 

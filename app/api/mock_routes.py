@@ -50,25 +50,12 @@ class MockDictionaryStoreProtocol(Protocol):
         """Return all persisted mock mappings."""
         ...
 
-    def upsert(
-        self,
-        source_text: str,
-        mock_value: str,
-        entity_type: str = "CUSTOM",
-        account_number: str | None = None,
-        field_role: str | None = None,
-    ) -> Any:
+    def upsert(self, source_text: str, mock_value: str) -> Any:
         """Create or update a mapping by source text."""
         ...
 
-    def override(
-        self,
-        mapping_id: str,
-        mock_value: str,
-        field_role: str | None = None,
-        account_number: str | None = None,
-    ) -> Any:
-        """Replace the mock (and optionally field_role/account_number)."""
+    def override(self, mapping_id: str, mock_value: str) -> Any:
+        """Replace the stored mock_value."""
         ...
 
     def delete(self, mapping_id: str) -> None:
@@ -97,9 +84,6 @@ class CreateMockRequest(BaseModel):
 
     source_text: str
     mock_value: str
-    entity_type: str = "CUSTOM"
-    field_role: str | None = None
-    account_number: str | None = None
 
     @field_validator("source_text", "mock_value")
     @classmethod
@@ -109,16 +93,9 @@ class CreateMockRequest(BaseModel):
 
 
 class OverrideMockRequest(BaseModel):
-    """Body for PUT /v1/mocks/{mapping_id}.
-
-    ``field_role``/``account_number`` are optional corrections — omitting
-    a field (vs. sending it as an empty string) leaves that stored value
-    untouched; an empty string explicitly clears it.
-    """
+    """Body for PUT /v1/mocks/{mapping_id}."""
 
     mock_value: str
-    field_role: str | None = None
-    account_number: str | None = None
 
     @field_validator("mock_value")
     @classmethod
@@ -210,7 +187,6 @@ def _as_dict(entry: Any) -> dict[str, Any]:
         "source_text": getattr(entry, "source_text", None),
         "normalized": getattr(entry, "normalized", None),
         "mock_value": getattr(entry, "mock_value", None),
-        "entity_type": getattr(entry, "entity_type", None),
         "assignment_source": getattr(entry, "assignment_source", None),
         "hit_count": getattr(entry, "hit_count", None),
         "created_at": getattr(entry, "created_at", None),
@@ -225,13 +201,6 @@ def _is_mapping_not_found(exc: Exception) -> bool:
     if type(exc).__name__ in _NOT_FOUND_TYPE_NAMES:
         return True
     return getattr(exc, "code", "") == "MAPPING_NOT_FOUND"
-
-
-def _entity_type_of(entry: Any) -> Any:
-    """Read entity_type from a mapping dict or object."""
-    if isinstance(entry, dict):
-        return entry.get("entity_type")
-    return getattr(entry, "entity_type", None)
 
 
 def _reraise_store_error(
@@ -269,13 +238,11 @@ router = APIRouter(
 
 @router.get("/mocks")
 async def list_mocks(
-    entity_type: str | None = None,
     store: MockDictionaryStoreProtocol = Depends(get_mock_store),
 ) -> dict[str, Any]:
-    """Return stored mappings, optionally filtered by exact entity_type.
+    """Return all stored mappings.
 
     Args:
-        entity_type: Optional exact-match filter on entry.entity_type.
         store: Injected mock dictionary store.
 
     Returns:
@@ -285,10 +252,8 @@ async def list_mocks(
         entries = store.list()
     except Exception as exc:
         _reraise_store_error(exc)
-    if entity_type is not None:
-        entries = [e for e in entries if _entity_type_of(e) == entity_type]
     serialized = [_as_dict(e) for e in entries]
-    logger.info("mock list count=%s entity_type=%s", len(serialized), entity_type)
+    logger.info("mock list count=%s", len(serialized))
     return {"count": len(serialized), "entries": serialized}
 
 
@@ -309,22 +274,15 @@ async def upsert_mock(
     req = _validate_body(CreateMockRequest, payload)
     try:
         existing_ids = {_as_dict(e).get("mapping_id") for e in store.list()}
-        entry = store.upsert(
-            req.source_text,
-            req.mock_value,
-            req.entity_type,
-            account_number=req.account_number,
-            field_role=req.field_role,
-        )
+        entry = store.upsert(req.source_text, req.mock_value)
     except Exception as exc:
         _reraise_store_error(exc)
     data = _as_dict(entry)
     mapping_id = data.get("mapping_id")
     status_code = 200 if mapping_id in existing_ids else 201
     logger.info(
-        "mock upsert mapping_id=%s entity_type=%s assignment_source=%s",
+        "mock upsert mapping_id=%s assignment_source=%s",
         mapping_id,
-        data.get("entity_type"),
         data.get("assignment_source"),
     )
     return JSONResponse(content=data, status_code=status_code)
@@ -348,19 +306,13 @@ async def override_mock(
     """
     req = _validate_body(OverrideMockRequest, payload)
     try:
-        entry = store.override(
-            mapping_id,
-            req.mock_value,
-            field_role=req.field_role,
-            account_number=req.account_number,
-        )
+        entry = store.override(mapping_id, req.mock_value)
     except Exception as exc:
         _reraise_store_error(exc, mapping_id=mapping_id)
     data = _as_dict(entry)
     logger.info(
-        "mock override mapping_id=%s entity_type=%s assignment_source=%s",
+        "mock override mapping_id=%s assignment_source=%s",
         mapping_id,
-        data.get("entity_type"),
         data.get("assignment_source"),
     )
     return data
@@ -425,9 +377,7 @@ async def download_mock_template() -> Response:
     """Download a starter CSV — same columns as ``/mocks/export``.
 
     Returns:
-        CSV attachment with headers and two worked examples. Leave
-        ``account_number`` blank for entities with no associated account
-        (e.g. a bank/counterparty name known only by label).
+        CSV attachment with headers and two worked examples.
     """
     from app.services.pii.mapping_csv import template_csv
 

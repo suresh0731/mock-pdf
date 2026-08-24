@@ -35,13 +35,10 @@ class MockEntry(BaseModel):
     source_text: str
     normalized: str
     mock_value: str
-    entity_type: str
     assignment_source: Literal["auto", "user"]
     hit_count: int
     created_at: datetime
     updated_at: datetime
-    account_number: str | None = None
-    field_role: str | None = None
 
 
 class LedgerEntry(BaseModel):
@@ -66,23 +63,22 @@ class SubstitutionLedger(BaseModel):
 
 
 class MockDictionaryStoreProtocol(Protocol):
-    """Contract for the mock dictionary (Stories 8–9 inject doubles)."""
+    """Contract for the mock dictionary (Stories 8–9 inject doubles).
+
+    Matching is by name text only — irrespective of any PII category the
+    caller detected the span as, the same source text always resolves to
+    the same stored mapping.
+    """
 
     def resolve(
         self,
         source_text: str,
-        entity_type: str,
         user_mock: str | None = None,
-        account_number: str | None = None,
-        field_role: str | None = None,
     ) -> MockEntry: ...
 
     def lookup(
         self,
         source_text: str,
-        entity_type: str,
-        account_number: str | None = None,
-        field_role: str | None = None,
     ) -> MockEntry | None: ...
 
     def list(self) -> list[MockEntry]: ...
@@ -91,28 +87,21 @@ class MockDictionaryStoreProtocol(Protocol):
         self,
         source_text: str,
         mock_value: str,
-        entity_type: str = "CUSTOM",
-        account_number: str | None = None,
-        field_role: str | None = None,
     ) -> MockEntry: ...
 
     def override(
         self,
         mapping_id: str,
         mock_value: str,
-        field_role: str | None = None,
-        account_number: str | None = None,
     ) -> MockEntry: ...
 
     def delete(self, mapping_id: str) -> None: ...
 
     def find_prefix_collisions(
-        self, normalized: str, entity_type: str, *, exclude_mapping_id: str | None = None
+        self, normalized: str, *, exclude_mapping_id: str | None = None
     ) -> list[MockEntry]: ...
 
-    def best_match_score(
-        self, normalized: str, entity_type: str, field_role: str | None = None
-    ) -> float: ...
+    def best_match_score(self, normalized: str) -> float: ...
 
 
 class LedgerStoreProtocol(Protocol):
