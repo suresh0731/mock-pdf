@@ -1,4 +1,4 @@
-"""Map Presidio character spans to ensemble-word bounding boxes.
+"""Map a detector's character spans to ensemble-word bounding boxes.
 
 Span matching is char-interval overlap only. ``merged_text`` is accepted for
 pipeline positional compatibility and is never sliced or logged (SEC-001).

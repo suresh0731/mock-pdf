@@ -21,7 +21,6 @@ async def lifespan(app: FastAPI):
     configure_tesseract()
     enforce_required_engines()
     settings.shard_base_path.mkdir(parents=True, exist_ok=True)
-    settings.recognizers_dir.mkdir(parents=True, exist_ok=True)
     (settings.shard_base_path / "audit" / "requests").mkdir(parents=True, exist_ok=True)
     settings.mock_dictionary_path.parent.mkdir(parents=True, exist_ok=True)
     (settings.shard_base_path / "shards").mkdir(parents=True, exist_ok=True)

@@ -59,7 +59,6 @@ def _run_pipeline(tmp_path: Path, image_path: Path) -> RedactAuditResponse:
     settings = Settings(
         shard_base_path=tmp_path,
         mock_dictionary_path=tmp_path / "mappings.json",
-        presidio_enabled=False,
         field_detection_enabled=True,
         restrict_to_known_mappings=False,
         _env_file=None,

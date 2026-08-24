@@ -25,8 +25,6 @@ class Settings(BaseSettings):
     auto_detect_language: bool = True
     tesseract_langs: str = "eng"
 
-    recognizers_dir: Path = Path("data/recognizers/custom")
-
     max_upload_mb: int = 25
     allowed_extensions: str = "jpg,jpeg,png,pdf,tiff,tif"
 
@@ -51,8 +49,18 @@ class Settings(BaseSettings):
     redact_dpi: int = 200
     max_concurrent_ocr: int = 3
 
-    presidio_enabled: bool = False
     field_detection_enabled: bool = True
+    # Scans the page's full OCR text for every value already curated in the
+    # mock dictionary (see app/services/pii/custom_redact.py's
+    # find_term_spans, the same mechanism used for a per-request custom
+    # term) and redacts any hit — independent of document layout/labels, so
+    # a known name/org is caught anywhere it appears (transaction
+    # narration, address block, ...) even on a document shape
+    # field_extractor.py doesn't recognize. Can never discover brand-new
+    # unseen text on its own (that's what field-anchored detection and
+    # per-request custom terms are for); it only ever matches text that's
+    # already in the dictionary.
+    dictionary_scan_enabled: bool = True
     # Restricts field-anchored detection to values already in the mock
     # dictionary — no brand-new auto-created entries for text nothing
     # matches. Table-cell OCR is noisy enough that free-running detection

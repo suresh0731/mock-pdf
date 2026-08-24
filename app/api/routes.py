@@ -10,7 +10,6 @@ from app.models.redact import RedactOptions
 from app.pipeline.errors import PipelineStageError
 from app.pipeline.redact import RedactPipeline
 from app.services.ocr.engines import easyocr_available, rapidocr_available, tesseract_available
-from app.services.pii.detector import detect_pii
 from app.services.redact.audit_store import AuditStore
 from app.services.redact.session_store import session_store
 from app.services.structure.docling_adapter import docling_available
@@ -189,6 +188,7 @@ async def ocr_only(file: UploadFile = File(...), locale: str | None = Form(None)
     from app.services.ocr.page_renderer import load_pages
     from app.services.preprocess.blur import detect_blur_tier
 
+    del locale  # kept for request-shape compatibility; no detector consumes it here.
     content = await file.read()
     pages = load_pages(content, file.filename or "upload")
     page_results = []
@@ -206,20 +206,4 @@ async def ocr_only(file: UploadFile = File(...), locale: str | None = Form(None)
             }
         )
     full = "\n".join(p["text"] for p in page_results)
-    detections = detect_pii(full, locale)
-    return {"text": full, "pages": page_results, "detections": detections}
-
-
-@router.get("/recognizers")
-async def list_recognizers():
-    settings = get_settings()
-    files = list(settings.recognizers_dir.glob("*.yaml")) if settings.recognizers_dir.exists() else []
-    return {"recognizers": [f.name for f in files]}
-
-
-@router.post("/recognizers/reload")
-async def reload_recognizers():
-    from app.services.pii import detector
-
-    detector._analyzer = None
-    return {"status": "reloaded"}
+    return {"text": full, "pages": page_results}

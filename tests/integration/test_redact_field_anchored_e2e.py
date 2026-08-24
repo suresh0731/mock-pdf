@@ -115,7 +115,6 @@ def _pipeline(tmp_path: Path, monkeypatch) -> tuple[RedactPipeline, MockDictiona
     settings = Settings(
         shard_base_path=tmp_path,
         mock_dictionary_path=tmp_path / "mappings.json",
-        presidio_enabled=False,
         field_detection_enabled=True,
         # These tests exercise the raw field-anchored detector (including
         # first-sight auto-creation) directly — unrelated to the
@@ -279,16 +278,17 @@ def test_field_anchored_pipeline_reuses_mock_via_fuzzy_match_without_account_num
     assert debit2.mock_value == debit1.mock_value
 
 
-def test_field_anchored_settings_default_disables_presidio_restricts_field_detection():
-    """Field-anchored detection is on by default, but restricted to the
-    curated mock dictionary — geometry-based table/label detection is the
-    only reliable way to locate PII in noisy multi-column OCR text, but
-    letting it auto-create entries for never-seen text produced dozens of
-    OCR-garbled near-duplicates. Curate the dictionary instead.
+def test_field_anchored_settings_default_restricts_field_detection():
+    """Field-anchored and dictionary-scan detection are both on by default,
+    but restricted to the curated mock dictionary — geometry-based
+    table/label detection is the only reliable way to locate PII in noisy
+    multi-column OCR text, but letting it auto-create entries for
+    never-seen text produced dozens of OCR-garbled near-duplicates. Curate
+    the dictionary instead.
     """
     settings = Settings(_env_file=None)
-    assert settings.presidio_enabled is False
     assert settings.field_detection_enabled is True
+    assert settings.dictionary_scan_enabled is True
     assert settings.restrict_to_known_mappings is True
 
 

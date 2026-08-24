@@ -58,6 +58,15 @@ def _contains_key(payload: object, key: str) -> bool:
     return False
 
 
+def _seed(store: MockDictionaryStore) -> None:
+    """Pre-populate the dictionary with ORG/PERSON so dictionary_scan_enabled
+    (the default detector now that whole-page NER/Presidio is gone) finds
+    them in the fixed fake-OCR text below — it can only ever match text
+    that's already known, never discover something brand-new on its own."""
+    store.resolve(ORG)
+    store.resolve(PERSON)
+
+
 def _words(page: int = 0) -> list[EnsembleWord]:
     return [
         EnsembleWord(
@@ -88,13 +97,6 @@ async def _fake_ocr(*args, **kwargs):
     return MERGED, _words(page), []
 
 
-def _fake_pii(text, locale=None):
-    return [
-        {"start": ORG_START, "end": ORG_END, "entity_type": "ORGANIZATION", "score": 0.99},
-        {"start": PERSON_START, "end": PERSON_END, "entity_type": "PERSON", "score": 0.98},
-    ]
-
-
 def _letter_page() -> Image.Image:
     return Image.new("RGB", (720, 1100), "white")
 
@@ -108,7 +110,6 @@ def _clear_caches() -> None:
 @pytest.fixture
 def patch_ocr_pii(monkeypatch):
     monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", _fake_ocr)
-    monkeypatch.setattr("app.pipeline.redact.detect_pii", _fake_pii)
     monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: [_letter_page()])
     monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
 
@@ -119,33 +120,36 @@ def wired_app(tmp_path, monkeypatch, patch_ocr_pii):
     monkeypatch.setenv("SHARD_BASE_PATH", str(tmp_path))
     monkeypatch.setenv("ADMIN_AUTH_ENABLED", "false")
     monkeypatch.setenv("API_KEY", "")
-    monkeypatch.setenv("PRESIDIO_ENABLED", "true")
     monkeypatch.setenv("FIELD_DETECTION_ENABLED", "false")
     monkeypatch.setenv("RESTRICT_TO_KNOWN_MAPPINGS", "false")
     _clear_caches()
     application = create_app()
+    _seed(get_mock_store())
     with TestClient(application) as client:
         yield client, tmp_path
     _clear_caches()
 
 
-def _pipeline(tmp_path: Path, monkeypatch) -> tuple[RedactPipeline, MockDictionaryStore, LedgerStore]:
+def _pipeline(
+    tmp_path: Path, monkeypatch, *, seed: bool = True
+) -> tuple[RedactPipeline, MockDictionaryStore, LedgerStore]:
     monkeypatch.setenv("SHARD_BASE_PATH", str(tmp_path))
     monkeypatch.setenv("MOCK_DICTIONARY_PATH", str(tmp_path / "mappings.json"))
     _clear_caches()
-    # These tests exercise dictionary/ledger/audit mechanics via a fake
-    # detector, independent of field-anchored detection specifics — opt
-    # into the legacy Presidio path explicitly and disable the new
+    # These tests exercise dictionary/ledger/audit mechanics via the
+    # dictionary-scan detector (dictionary_scan_enabled, on by default),
+    # independent of field-anchored detection specifics — disable the
     # geometry-only detector so it can't add/remove regions here.
     settings = Settings(
         shard_base_path=tmp_path,
         mock_dictionary_path=tmp_path / "mappings.json",
-        presidio_enabled=True,
         field_detection_enabled=False,
         restrict_to_known_mappings=False,
         _env_file=None,
     )
     mock_store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
+    if seed:
+        _seed(mock_store)
     ledger_store = LedgerStore(base_dir=tmp_path / "shards")
     return (
         RedactPipeline(
@@ -171,12 +175,29 @@ def _post_redact(client: TestClient) -> object:
     )
 
 
-def _org_region(audit) -> object:
-    return next(r for r in audit.redactions if r.entity_type == "ORGANIZATION")
+def _org_region(pipeline: RedactPipeline, audit) -> object:
+    entry = pipeline.mock_store.lookup(ORG)
+    return next(r for r in audit.redactions if r.mapping_id == entry.mapping_id)
 
 
-def _person_region(audit) -> object:
-    return next(r for r in audit.redactions if r.entity_type == "PERSON")
+def _person_region(pipeline: RedactPipeline, audit) -> object:
+    entry = pipeline.mock_store.lookup(PERSON)
+    return next(r for r in audit.redactions if r.mapping_id == entry.mapping_id)
+
+
+def _mapping_id_for(client: TestClient, source_text: str) -> str:
+    mocks = client.get("/v1/mocks").json()
+    return next(e["mapping_id"] for e in mocks["entries"] if e["source_text"] == source_text)
+
+
+def _org_region_http(client: TestClient, audit: dict) -> dict:
+    mapping_id = _mapping_id_for(client, ORG)
+    return next(r for r in audit["redactions"] if r["mapping_id"] == mapping_id)
+
+
+def _person_region_http(client: TestClient, audit: dict) -> dict:
+    mapping_id = _mapping_id_for(client, PERSON)
+    return next(r for r in audit["redactions"] if r["mapping_id"] == mapping_id)
 
 
 def test_redact_options_patch_flags_default_true():
@@ -231,8 +252,8 @@ def test_pipeline_reuses_mock_across_two_jobs(tmp_path, monkeypatch, patch_ocr_p
     pipeline, _, _ = _pipeline(tmp_path, monkeypatch)
     _, audit1, _ = _run(pipeline)
     _, audit2, _ = _run(pipeline)
-    org1 = _org_region(audit1)
-    org2 = _org_region(audit2)
+    org1 = _org_region(pipeline, audit1)
+    org2 = _org_region(pipeline, audit2)
     assert org1.mock_value == org2.mock_value
     assert org1.mapping_id == org2.mapping_id
 
@@ -240,20 +261,25 @@ def test_pipeline_reuses_mock_across_two_jobs(tmp_path, monkeypatch, patch_ocr_p
 def test_pipeline_user_override_xxx_used_on_later_job(tmp_path, monkeypatch, patch_ocr_pii):
     pipeline, store, _ = _pipeline(tmp_path, monkeypatch)
     _, audit1, _ = _run(pipeline)
-    org1 = _org_region(audit1)
+    org1 = _org_region(pipeline, audit1)
     store.override(org1.mapping_id, "XXX")
     _, audit2, _ = _run(pipeline)
-    org2 = _org_region(audit2)
+    org2 = _org_region(pipeline, audit2)
     assert org2.mock_value == "XXX"
     assert org2.assignment_source == "user"
 
 
-def test_pipeline_unseen_person_gets_person_nn(tmp_path, monkeypatch, patch_ocr_pii):
-    pipeline, store, _ = _pipeline(tmp_path, monkeypatch)
-    _, audit, _ = _run(pipeline)
-    person = _person_region(audit)
-    assert MOCK_RE.fullmatch(person.mock_value)
-    assert any(e.mock_value == person.mock_value for e in store.list())
+def test_pipeline_unseen_custom_term_gets_auto_mock(tmp_path, monkeypatch, patch_ocr_pii):
+    """Dictionary-scan (dictionary_scan_enabled) can only ever match text
+    already in the dictionary — discovering a brand-new, never-seen value
+    now requires an explicit custom redaction term (no mock_label), which
+    still gets a deterministic auto-assigned MOCK_xx value."""
+    pipeline, store, _ = _pipeline(tmp_path, monkeypatch, seed=False)
+    opts = RedactOptions(custom_redactions=[CustomRedactTerm(search_value=PERSON)])
+    _, audit, _ = _run(pipeline, opts)
+    custom = next(r for r in audit.redactions if r.entity_type == "CUSTOM")
+    assert MOCK_RE.fullmatch(custom.mock_value)
+    assert any(e.mock_value == custom.mock_value for e in store.list())
 
 
 def test_structure_extraction_receives_original_not_line_stripped_image(tmp_path, monkeypatch):
@@ -301,13 +327,12 @@ def test_pipeline_custom_mock_label_upserts_user(tmp_path, monkeypatch, patch_oc
     row = next(e for e in store.list() if e.source_text == ORG)
     assert row.assignment_source == "user"
     assert row.mock_value == "XXX"
-    org = _org_region(audit)
+    org = _org_region(pipeline, audit)
     assert org.mock_value == "XXX"
     assert org.assignment_source == "user"
 
 
 def test_pipeline_custom_default_label_is_not_user_override(tmp_path, monkeypatch, patch_ocr_pii):
-    monkeypatch.setattr("app.pipeline.redact.detect_pii", lambda *a, **k: [])
     pipeline, store, _ = _pipeline(tmp_path, monkeypatch)
     opts = RedactOptions(custom_redactions=[CustomRedactTerm(search_value=ORG)])
     _, audit, _ = _run(pipeline, opts)
@@ -325,7 +350,7 @@ def test_pipeline_saves_ledger_with_source_mock(tmp_path, monkeypatch, patch_ocr
     ledger = ledger_store.get(audit.request_id)
     assert ledger is not None
     match = next(e for e in ledger.entries if e.source_text == ORG)
-    org = _org_region(audit)
+    org = _org_region(pipeline, audit)
     assert match.mock_value == org.mock_value
 
 
@@ -451,8 +476,8 @@ def test_e2e_two_jobs_reuse_org_mock(wired_app):
     assert second.status_code == 200
     audit1 = client.get(f"/v1/redact/audit/{first.headers['X-Request-Id']}").json()
     audit2 = client.get(f"/v1/redact/audit/{second.headers['X-Request-Id']}").json()
-    org1 = next(r for r in audit1["redactions"] if r["entity_type"] == "ORGANIZATION")
-    org2 = next(r for r in audit2["redactions"] if r["entity_type"] == "ORGANIZATION")
+    org1 = _org_region_http(client, audit1)
+    org2 = _org_region_http(client, audit2)
     assert org1["mock_value"] == org2["mock_value"]
     assert org1["mapping_id"] == org2["mapping_id"]
 
@@ -461,12 +486,12 @@ def test_e2e_put_override_xxx_then_later_job(wired_app):
     client, _ = wired_app
     first = _post_redact(client)
     audit1 = client.get(f"/v1/redact/audit/{first.headers['X-Request-Id']}").json()
-    org = next(r for r in audit1["redactions"] if r["entity_type"] == "ORGANIZATION")
+    org = _org_region_http(client, audit1)
     put = client.put(f"/v1/mocks/{org['mapping_id']}", json={"mock_value": "XXX"})
     assert put.status_code == 200
     later = _post_redact(client)
     audit = client.get(f"/v1/redact/audit/{later.headers['X-Request-Id']}").json()
-    org2 = next(r for r in audit["redactions"] if r["entity_type"] == "ORGANIZATION")
+    org2 = _org_region_http(client, audit)
     assert org2["mock_value"] == "XXX"
 
 
@@ -474,7 +499,7 @@ def test_e2e_person_auto_person_nn(wired_app):
     client, _ = wired_app
     response = _post_redact(client)
     audit = client.get(f"/v1/redact/audit/{response.headers['X-Request-Id']}").json()
-    person = next(r for r in audit["redactions"] if r["entity_type"] == "PERSON")
+    person = _person_region_http(client, audit)
     assert MOCK_RE.fullmatch(person["mock_value"])
 
 

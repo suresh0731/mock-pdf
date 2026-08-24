@@ -32,7 +32,6 @@ from app.services.ocr.page_renderer import load_pages
 from app.services.pii.brand_zones import BrandZone, detect_brand_zones
 from app.services.pii.coordinate_map import apply_padding, canonical_to_original
 from app.services.pii.custom_redact import find_term_spans
-from app.services.pii.detector import detect_pii
 from app.services.pii.ensemble_mapper import (
     map_span_to_ensemble_bbox,
     union_bbox,
@@ -56,8 +55,8 @@ class _SpanCandidate(NamedTuple):
     """A detected span awaiting mock-dictionary resolution.
 
     ``field_role``/``account_number`` are set for field-anchored candidates
-    (see ``field_extractor``) and left ``None`` for custom terms and the
-    optional legacy Presidio path.
+    (see ``field_extractor``) and left ``None`` for custom terms and
+    dictionary-scan hits (see ``dictionary_scan_enabled``).
 
     ``words`` carries the exact matched ``EnsembleWord``\\s for
     field-anchored candidates — geometry and source text are built
@@ -65,7 +64,7 @@ class _SpanCandidate(NamedTuple):
     words are visually adjacent but commonly non-contiguous in
     ``merged_text``, so re-deriving words via character-overlap on that
     range would sweep in unrelated ones). Empty for custom terms and
-    Presidio spans, which use the char-span path instead since their
+    dictionary-scan spans, which use the char-span path instead since their
     ranges are genuine contiguous slices of ``merged_text``.
     """
 
@@ -723,13 +722,16 @@ class RedactPipeline:
         opts: RedactOptions,
         region_start: int,
     ) -> tuple[list[RedactionRegion], list[PageAuditSummary], list[dict], list[dict]]:
-        locale, _, _ = resolve_languages(opts.locale, opts.languages, opts.auto_detect, "")
         all_redactions: list[RedactionRegion] = []
         page_audits: list[PageAuditSummary] = []
         ledger_rows: list[dict] = []
         brand_zone_dicts: list[dict] = []
         region_counter = region_start
-        seen_keys: set[tuple[int, int, int, int, str]] = set()
+        # Keyed on the physical padded box only (not entity_type): more than
+        # one detection source (field-anchored, dictionary-scan, a custom
+        # term) can independently land on the exact same underlying text —
+        # this must still only ever paint/log one redaction for it.
+        seen_keys: set[tuple[int, int, int, int]] = set()
 
         self._upsert_custom_overrides(opts)
 
@@ -760,15 +762,29 @@ class RedactPipeline:
                         )
                     )
 
-            if self.settings.presidio_enabled:
-                for d in detect_pii(merged_text, locale):
-                    spans.append(
-                        _SpanCandidate(d["start"], d["end"], d["entity_type"], d["score"], None, None, None)
-                    )
-
             for term in opts.custom_redactions:
                 for start, end in find_term_spans(merged_text, term.search_value):
                     spans.append(_SpanCandidate(start, end, "CUSTOM", 0.95, term, None, None))
+
+            if self.settings.dictionary_scan_enabled:
+                # Every value already curated in the mock dictionary is
+                # searched for directly in this page's OCR text, the same
+                # way a per-request custom term is (find_term_spans) —
+                # independent of field_extractor's layout/label detection,
+                # so a known name/org is caught anywhere it appears on the
+                # page (e.g. inside a transaction narration, not just an
+                # "A/C Name:" field) even on a document shape field_extractor
+                # doesn't recognize. Can only ever match text that's already
+                # known; it never discovers brand-new unseen PII on its own.
+                # Runs last (lowest priority): field-anchored and explicit
+                # custom-term spans above already claim their own physical
+                # boxes via seen_keys, so this only ever fills in text those
+                # more specific detectors didn't already cover.
+                for entry in self.mock_store.list():
+                    for start, end in find_term_spans(merged_text, entry.source_text):
+                        spans.append(
+                            _SpanCandidate(start, end, "KNOWN_TERM", 0.95, None, None, None)
+                        )
 
             for start, end, entity_type, score, term, _field_role, _account_number, cand_words in spans:
                 if cand_words:
@@ -825,7 +841,7 @@ class RedactPipeline:
                     left_neighbor_x=left_neighbor_x,
                     right_neighbor_x=right_neighbor_x,
                 )
-                key = (canonical.page_index, padded.x, padded.y, padded.w, entity_type)
+                key = (canonical.page_index, padded.x, padded.y, padded.w)
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
@@ -835,12 +851,14 @@ class RedactPipeline:
 
                 user_mock = _user_mock_for_term(term) if term is not None else None
                 if term is None and self.settings.restrict_to_known_mappings:
-                    # Field-anchored/Presidio candidate under restricted mode:
-                    # only paint it if it already matches the curated
-                    # dictionary (exact or trusted fuzzy) — never
-                    # auto-create a new entry for unseen text. Explicit
-                    # custom redaction terms (term is not None) are a direct
-                    # user instruction and always resolve/create regardless.
+                    # Field-anchored/dictionary-scan candidate under
+                    # restricted mode: only paint it if it already matches
+                    # the curated dictionary (exact or trusted fuzzy) —
+                    # never auto-create a new entry for unseen text (moot
+                    # for dictionary-scan hits, which are already known by
+                    # construction). Explicit custom redaction terms (term
+                    # is not None) are a direct user instruction and always
+                    # resolve/create regardless.
                     entry = self.mock_store.lookup(source_text)
                     if entry is None:
                         continue

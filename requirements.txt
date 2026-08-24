@@ -14,10 +14,6 @@ pillow==12.3.0
 pytesseract==0.3.13
 pymupdf==1.28.0
 pdf2image==1.17.0
-presidio-analyzer==2.2.362
-presidio-anonymizer==2.2.363
-spacy==3.8.13
-pyyaml==6.0.2
 langdetect==1.0.9
 phonenumbers==9.0.34
 python-dotenv==1.2.2

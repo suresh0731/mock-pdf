@@ -52,7 +52,7 @@ To fully vendor: after a clean install's first successful run, zip `%USERPROFILE
 |---------|-------------|
 | Side-by-side preview | Original PDF left, redacted PDF right |
 | Upload | PDF, PNG, JPG, TIFF |
-| Auto PII redaction | Presidio + deterministic single-engine OCR (documented fallback order) |
+| Auto PII redaction | Field-anchored layout detection + dictionary-scan of curated mappings + deterministic single-engine OCR (documented fallback order) |
 | OCR engine picker | "Auto" uses the deterministic default engine order; pick Tesseract/EasyOCR/RapidOCR to force one — e.g. RapidOCR reads table-heavy statements more reliably than EasyOCR |
 | Custom mock values | One per line; `value=MOCK_LABEL` for audit tags |
 | Regenerate | Re-applies redactions using cached OCR (fast) |
