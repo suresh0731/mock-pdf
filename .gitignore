@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env.local
+data/shards/
+data/audit/
+# Local runtime-learned mock-dictionary cache (hit_count/timestamps/auto
+# entries) — machine-local scratch state, not source of truth. The curated,
+# git-tracked seed lives in mappings.seed.json and is explicitly re-included
+# below so cloning the repo always starts from identical curated mappings.
+data/mock-dictionary/*
+!data/mock-dictionary/mappings.seed.json
+*.egg-info/
+.pytest_cache/
+.fsd3/
+.mypy_cache/
+.ruff_cache/

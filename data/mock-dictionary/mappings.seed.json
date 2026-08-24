@@ -1,0 +1,155 @@
+{
+  "entries": [
+    {
+      "source_text": "Standard Chartered Custody",
+      "mock_value": "XYZ Bank",
+      "entity_type": "ORGANIZATION",
+      "field_role": "bank_name"
+    },
+    {
+      "source_text": "PT BNI LIFE INSURANCE",
+      "mock_value": "ORG_02",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608778491",
+      "field_role": "debit_account_name"
+    },
+    {
+      "source_text": "Blife Link Campuran Selaras Plus",
+      "mock_value": "ORG_03",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788780",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Pasar Uang Likuid",
+      "mock_value": "ORG_04",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30609982386",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Pendapatan Tetap Stabil",
+      "mock_value": "ORG_05",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788713",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Campuran Kombinasi",
+      "mock_value": "ORG_06",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788845",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Pendapatan Tetap Cemerlang",
+      "mock_value": "ORG_07",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788802",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Saham Aktif",
+      "mock_value": "ORG_08",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788861",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Saham Maksima",
+      "mock_value": "ORG_09",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788756",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Blife Link Saham Maksima Plus",
+      "mock_value": "ORG_10",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30608788799",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Dian Wicaksono",
+      "mock_value": "PERSON_01",
+      "entity_type": "PERSON",
+      "field_role": "signatory_person"
+    },
+    {
+      "source_text": "Reksa Dana Indeks BNI-AM Pefindo I-Grade",
+      "mock_value": "ORG_11",
+      "entity_type": "ORGANIZATION",
+      "account_number": "30681733044",
+      "field_role": "debit_account_name"
+    },
+    {
+      "source_text": "SMBC Indonesia",
+      "mock_value": "ORG_12",
+      "entity_type": "ORGANIZATION",
+      "account_number": "0001-808720-360",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Ibu Ambarwati",
+      "mock_value": "PERSON_02",
+      "entity_type": "PERSON",
+      "field_role": "addressee"
+    },
+    {
+      "source_text": "Ari Sutriadi",
+      "mock_value": "PERSON_03",
+      "entity_type": "PERSON",
+      "field_role": "signatory_person"
+    },
+    {
+      "source_text": "Reksa Dana Bahana Primavera 99",
+      "mock_value": "ORG_13",
+      "entity_type": "ORGANIZATION",
+      "account_number": "306-0960480-2",
+      "field_role": "debit_account_name"
+    },
+    {
+      "source_text": "PT BNI Sekuritas",
+      "mock_value": "ORG_14",
+      "entity_type": "ORGANIZATION",
+      "account_number": "0020195063",
+      "field_role": "credit_account_name"
+    },
+    {
+      "source_text": "Mr. Wisnu",
+      "mock_value": "PERSON_04",
+      "entity_type": "PERSON",
+      "field_role": "addressee"
+    },
+    {
+      "source_text": "Ms. Mitha",
+      "mock_value": "PERSON_05",
+      "entity_type": "PERSON",
+      "field_role": "addressee"
+    },
+    {
+      "source_text": "Wahyu Wijaya",
+      "mock_value": "PERSON_06",
+      "entity_type": "PERSON",
+      "field_role": "signatory_person"
+    },
+    {
+      "source_text": "Mira Octora S",
+      "mock_value": "PERSON_07",
+      "entity_type": "PERSON",
+      "field_role": "signatory_person"
+    },
+    {
+      "source_text": "PT Schroder Investment Management Indonesia",
+      "mock_value": "ORG_15",
+      "entity_type": "ORGANIZATION",
+      "field_role": "counterparty_org"
+    },
+    {
+      "source_text": "Yunita Chaniago",
+      "mock_value": "PERSON_08",
+      "entity_type": "PERSON",
+      "field_role": "addressee"
+    }
+  ]
+}

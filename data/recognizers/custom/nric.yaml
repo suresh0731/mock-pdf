@@ -1,0 +1,5 @@
+entity: NRIC
+patterns:
+  - name: nric
+    pattern: '[STFGM]\d{7}[A-Z]'
+    score: 0.9
