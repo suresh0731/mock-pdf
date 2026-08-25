@@ -988,6 +988,8 @@ class RedactPipeline:
                 [s.canonical.original_image for s in page_states],
                 redactions,
                 filename,
+                image_format=self.settings.redact_output_image_format,
+                jpeg_quality=self.settings.redact_output_jpeg_quality,
             )
         except Exception as exc:
             raise PipelineStageError("redact_render", "Failed to render redacted PDF", exc) from exc

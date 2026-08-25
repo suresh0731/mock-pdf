@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     audit_retention_days: int = 90
     redact_dpi: int = 200
     max_concurrent_ocr: int = 3
+    # Output page images are rasterized at redact_dpi and re-encoded once the
+    # redaction boxes are painted on (see app/services/redact/pdf_renderer.py)
+    # — the source PDF's original vector text/compressed images are gone
+    # either way, since burning boxes into pixels is what guarantees the
+    # underlying PII can't leak back out. "jpeg" (default) keeps the
+    # resulting PDF close to the original file size; a scanned/photographed
+    # page's noise compresses far worse under lossless "png" (often 5-10x
+    # larger) for no visible quality gain on a document redaction.
+    redact_output_image_format: str = "jpeg"
+    redact_output_jpeg_quality: int = 85
 
     field_detection_enabled: bool = True
     # Scans the page's full OCR text for every value already curated in the

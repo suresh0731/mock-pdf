@@ -187,10 +187,15 @@ def _draw_on_image(image: Image.Image, regions: Sequence[PaintedRegion]) -> Imag
     return out
 
 
+_VALID_IMAGE_FORMATS = ("jpeg", "png")
+
+
 def render_redacted_pdf(
     original_pages: list[Image.Image],
     redactions: Sequence[PaintedRegion],
     filename: str,
+    image_format: str = "jpeg",
+    jpeg_quality: int = 85,
 ) -> bytes:
     """White rect + black mock_value. Brand zones drawn last. PyMuPDF assemble.
 
@@ -198,10 +203,21 @@ def render_redacted_pdf(
         original_pages: Unmodified page images to paint on.
         redactions: Duck-typed regions with page + padded_bbox.
         filename: Original upload name; used only as sanitized PDF title.
+        image_format: "jpeg" (default) or "png" for the embedded page image.
+            A scanned/photographed page's noise compresses far worse under
+            lossless PNG (often 5-10x larger) than JPEG, for no visible
+            quality difference once redaction boxes are already painted on.
+        jpeg_quality: 1-95 Pillow JPEG quality, only used when
+            ``image_format == "jpeg"``.
 
     Returns:
         Assembled PDF bytes.
     """
+    fmt = image_format.lower()
+    if fmt not in _VALID_IMAGE_FORMATS:
+        logger.warning("unknown_redact_image_format format=%s falling_back=jpeg", image_format)
+        fmt = "jpeg"
+
     ordered = _regions_in_draw_order(redactions)
     by_page: dict[int, list[PaintedRegion]] = {}
     for region in ordered:
@@ -212,11 +228,14 @@ def render_redacted_pdf(
         for page_idx, image in enumerate(original_pages):
             redacted = _draw_on_image(image, by_page.get(page_idx, []))
             buf = io.BytesIO()
-            redacted.save(buf, format="PNG")
-            png_bytes = buf.getvalue()
+            if fmt == "jpeg":
+                redacted.save(buf, format="JPEG", quality=jpeg_quality)
+            else:
+                redacted.save(buf, format="PNG")
+            image_bytes = buf.getvalue()
             rect = fitz.Rect(0, 0, image.width, image.height)
             page = doc.new_page(width=image.width, height=image.height)
-            page.insert_image(rect, stream=png_bytes)
+            page.insert_image(rect, stream=image_bytes)
 
         doc.set_metadata({"title": _sanitize_filename(filename)})
         pdf_bytes = doc.tobytes()
@@ -224,9 +243,10 @@ def render_redacted_pdf(
         doc.close()
 
     logger.info(
-        "redacted_pdf_rendered page_count=%s region_count=%s filename_hash=%s",
+        "redacted_pdf_rendered page_count=%s region_count=%s image_format=%s filename_hash=%s",
         len(original_pages),
         len(redactions),
+        fmt,
         hashlib.sha256(filename.encode("utf-8", errors="replace")).hexdigest(),
     )
     return pdf_bytes
