@@ -29,7 +29,12 @@ from app.services.locale.resolver import resolve_languages
 from app.services.ocr.ensemble import ensemble_ocr_page
 from app.services.ocr.ensemble_types import EnsembleWord
 from app.services.ocr.page_renderer import load_pages
-from app.services.pii.brand_zones import BrandZone, detect_brand_zones, detect_picture_zones
+from app.services.pii.brand_zones import (
+    BrandZone,
+    detect_brand_zones,
+    detect_picture_zones,
+    reconcile_picture_zones_with_text,
+)
 from app.services.pii.coordinate_map import apply_padding, canonical_to_original
 from app.services.pii.custom_redact import find_term_spans
 from app.services.pii.ensemble_mapper import (
@@ -1035,6 +1040,13 @@ class RedactPipeline:
                 existing_zones=zones,
                 enabled=opts.patch_images and self.settings.patch_images_enabled,
                 min_area_pct=self.settings.image_zone_min_area_pct,
+            )
+            text_boxes = [r.padded_bbox for r in page_redactions]
+            min_picture_area = (
+                self.settings.image_zone_min_area_pct * original.width * original.height
+            )
+            zones = reconcile_picture_zones_with_text(
+                zones, text_boxes, min_area=min_picture_area
             )
             for zone in zones:
                 region_counter += 1

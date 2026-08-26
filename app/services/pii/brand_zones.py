@@ -211,6 +211,145 @@ def _overlap_area(a: BBox, b: BBox) -> int:
 
 
 _PICTURE_COVERAGE_THRESHOLD = 0.6
+# A picture whose own area is mostly a word patch is a table-cell logo
+# sitting on already-mocked text (the tiny "IMAGE" over "DSDC_Bank" in
+# the Bank column). Skip it; the word patch already covers that PII.
+_PICTURE_OWN_OVERLAP_SKIP = 0.5
+# A word patch whose own area is mostly inside the picture is OCR of
+# logo/stamp ink — keep the IMAGE box as-is so it still covers the
+# graphic; draw-order paints IMAGE last over that mock.
+_WORD_INSIDE_PICTURE_COVERAGE = 0.6
+_PICTURE_INSET_FRACTION = 0.15
+_PICTURE_INSET_MIN_PX = 8
+
+
+def _bbox_center_xy(bbox: BBox) -> tuple[float, float]:
+    return bbox.x + bbox.w / 2, bbox.y + bbox.h / 2
+
+
+def _point_in_bbox(bbox: BBox, x: float, y: float) -> bool:
+    return bbox.x <= x <= bbox.x + bbox.w and bbox.y <= y <= bbox.y + bbox.h
+
+
+def _picture_center_in_cell(bbox: BBox, blocks: list[DocBlock]) -> bool:
+    """True when the picture sits inside a table cell (bank-column logos)."""
+    cx, cy = _bbox_center_xy(bbox)
+    for block in blocks:
+        if block.block_type.lower() != "cell":
+            continue
+        if _point_in_bbox(block.bbox, cx, cy):
+            return True
+    return False
+
+
+def _shrink_bbox_to_avoid(box: BBox, blocker: BBox) -> BBox | None:
+    """Largest remaining piece of ``box`` after cutting off ``blocker``.
+
+    Axis-aligned: keep the slab above, below, left, or right of the
+    blocker, whichever retains the most area. ``None`` if nothing usable
+    remains (blocker covers the whole box).
+    """
+    if _overlap_area(box, blocker) <= 0:
+        return box
+    box_x2, box_y2 = box.x + box.w, box.y + box.h
+    blk_x2, blk_y2 = blocker.x + blocker.w, blocker.y + blocker.h
+    candidates: list[BBox] = []
+    above_h = blocker.y - box.y
+    if above_h >= 1:
+        candidates.append(BBox(x=box.x, y=box.y, w=box.w, h=above_h))
+    below_h = box_y2 - blk_y2
+    if below_h >= 1:
+        candidates.append(BBox(x=box.x, y=blk_y2, w=box.w, h=below_h))
+    left_w = blocker.x - box.x
+    if left_w >= 1:
+        candidates.append(BBox(x=box.x, y=box.y, w=left_w, h=box.h))
+    right_w = box_x2 - blk_x2
+    if right_w >= 1:
+        candidates.append(BBox(x=blk_x2, y=box.y, w=right_w, h=box.h))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda b: b.w * b.h)
+
+
+def _word_deeply_inside_picture(picture: BBox, word: BBox) -> bool:
+    """True when ``word``'s center sits inset from every edge of ``picture``.
+
+    Distinguishes logo-OCR (a small word in the middle of a stamp — keep
+    IMAGE covering it) from an oversized signature box that only just
+    contains the mocked name along its rim (clip IMAGE off that name).
+    """
+    margin_x = max(_PICTURE_INSET_MIN_PX, int(_PICTURE_INSET_FRACTION * picture.w))
+    margin_y = max(_PICTURE_INSET_MIN_PX, int(_PICTURE_INSET_FRACTION * picture.h))
+    inner_x1 = picture.x + margin_x
+    inner_y1 = picture.y + margin_y
+    inner_x2 = picture.x + picture.w - margin_x
+    inner_y2 = picture.y + picture.h - margin_y
+    if inner_x2 <= inner_x1 or inner_y2 <= inner_y1:
+        return False
+    cx, cy = _bbox_center_xy(word)
+    return inner_x1 <= cx <= inner_x2 and inner_y1 <= cy <= inner_y2
+
+
+def reconcile_picture_zones_with_text(
+    zones: list[BrandZone],
+    text_boxes: list[BBox],
+    *,
+    min_area: float = 0.0,
+) -> list[BrandZone]:
+    """Fit IMAGE zones around already-painted word patches.
+
+    Word patches are collected first; IMAGE is painted last and would
+    otherwise cover mocked names (signature stamps overlapping
+    ``DTMLI`` / signatory lines, tiny bank logos overlapping
+    ``DSDC_Bank``). Footer zones pass through unchanged.
+
+    Per picture zone, against each overlapping word box:
+
+    - Word mostly inside the picture *and* inset from its edges: leave
+      IMAGE (logo/stamp OCR sitting in the middle of the graphic).
+    - Picture mostly overlapping the word: drop IMAGE (cell logo).
+    - Partial/adjacent overlap, including a name along the picture's
+      rim: shrink IMAGE off the word box.
+    """
+    if not text_boxes:
+        return zones
+    result: list[BrandZone] = []
+    for zone in zones:
+        if zone.zone != "picture":
+            result.append(zone)
+            continue
+        box = zone.bbox
+        skip = False
+        for text_box in text_boxes:
+            overlap = _overlap_area(box, text_box)
+            if overlap <= 0:
+                continue
+            word_area = text_box.w * text_box.h
+            pic_area = box.w * box.h
+            if (
+                word_area > 0
+                and overlap / word_area >= _WORD_INSIDE_PICTURE_COVERAGE
+                and _word_deeply_inside_picture(box, text_box)
+            ):
+                continue
+            if pic_area > 0 and overlap / pic_area >= _PICTURE_OWN_OVERLAP_SKIP:
+                skip = True
+                break
+            shrunk = _shrink_bbox_to_avoid(box, text_box)
+            if shrunk is None:
+                skip = True
+                break
+            box = shrunk
+        if skip:
+            continue
+        if box.w * box.h < min_area:
+            continue
+        if box != zone.bbox:
+            zone = BrandZone(
+                zone=zone.zone, page=zone.page, bbox=box, label=zone.label
+            )
+        result.append(zone)
+    return result
 
 
 def _covered_by_existing(bbox: BBox, existing_zones: list["BrandZone"]) -> bool:
@@ -283,6 +422,8 @@ def detect_picture_zones(
         if clamped is None:
             continue
         if clamped.w * clamped.h < min_area:
+            continue
+        if _picture_center_in_cell(clamped, resolved_blocks):
             continue
         if _covered_by_existing(clamped, resolved_existing):
             continue
