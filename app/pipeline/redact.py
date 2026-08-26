@@ -199,10 +199,23 @@ def _row_neighbor_clamp_x(
 
 _LOOKAHEAD_MAX_EXTRA_WORDS = 3
 _LOOKAHEAD_DECISIVE_MARGIN = 0.03
+# Same scale as the spillover fail-safe: one line-height (plus a little
+# slack) is a plausible gap between words of the *same* value; anything
+# wider is the next table column or the next row, which must not be
+# absorbed into this redaction.
+_EXTENSION_MAX_GAP_FACTOR = 1.5
+# A later detector (dictionary-scan of a nested short alias, an
+# over-extended maximal-munch window) that substantially overlaps an
+# already-painted box is skipped rather than stacking a second patch.
+_PADDED_OVERLAP_SKIP_THRESHOLD = 0.5
 
 
 def _nearest_extension_word(
-    bbox: BBox, words: list[EnsembleWord], excluded_ids: set[int]
+    bbox: BBox,
+    words: list[EnsembleWord],
+    excluded_ids: set[int],
+    *,
+    origin_cell: BBox | None = None,
 ) -> EnsembleWord | None:
     """The one word that most plausibly continues a value right after
     ``bbox``: the closest word to its right on the same visual row, or —
@@ -216,16 +229,29 @@ def _nearest_extension_word(
     stitching* half of this same failure mode — this covers the
     *matching* half, for when a continuation word still ends up
     unattached to any candidate's word list).
+
+    A candidate is rejected when it sits farther than
+    ``_EXTENSION_MAX_GAP_FACTOR`` line-heights away (the next column /
+    next row, not a continuation) or, when ``origin_cell`` is known,
+    when its center falls outside that cell — so a table-cell name is
+    never extended into the neighboring amount/account-number column.
     """
     same_row_right: tuple[float, EnsembleWord] | None = None
     below: tuple[float, EnsembleWord] | None = None
+    max_gap = _EXTENSION_MAX_GAP_FACTOR * max(bbox.h, 1)
     for w in words:
         if id(w) in excluded_ids or w.bbox.w <= 0:
             continue
+        if origin_cell is not None:
+            cx, cy = _bbox_center(w.bbox)
+            if not _point_in_bbox(origin_cell, cx, cy):
+                continue
         y_overlap = min(bbox.y + bbox.h, w.bbox.y + w.bbox.h) - max(bbox.y, w.bbox.y)
         same_row = y_overlap > 0.5 * min(bbox.h, w.bbox.h)
         if same_row and w.bbox.x >= bbox.x + bbox.w:
             gap = w.bbox.x - (bbox.x + bbox.w)
+            if gap > max_gap:
+                continue
             if same_row_right is None or gap < same_row_right[0]:
                 same_row_right = (gap, w)
         elif not same_row and w.bbox.y >= bbox.y + bbox.h:
@@ -234,6 +260,8 @@ def _nearest_extension_word(
             if not same_column_ish:
                 continue
             gap = w.bbox.y - (bbox.y + bbox.h)
+            if gap > max_gap:
+                continue
             if below is None or gap < below[0]:
                 below = (gap, w)
     if same_row_right is not None:
@@ -247,6 +275,8 @@ def _build_window_candidates(
     matched_words: list[EnsembleWord],
     ensemble_words: list[EnsembleWord],
     max_extra: int = _LOOKAHEAD_MAX_EXTRA_WORDS,
+    *,
+    origin_cell: BBox | None = None,
 ) -> list[list[EnsembleWord]]:
     """Candidate word windows for maximal-munch resolution: the original
     match, up to ``max_extra`` geometrically-extended versions (one more
@@ -264,7 +294,9 @@ def _build_window_candidates(
     excluded_ids = {id(w) for w in matched_words}
     extended = list(matched_words)
     for _ in range(max_extra):
-        nxt = _nearest_extension_word(union_bbox(extended), ensemble_words, excluded_ids)
+        nxt = _nearest_extension_word(
+            union_bbox(extended), ensemble_words, excluded_ids, origin_cell=origin_cell
+        )
         if nxt is None:
             break
         extended = extended + [nxt]
@@ -281,6 +313,7 @@ def _resolve_maximal_munch_window(
     mock_store: MockDictionaryStoreProtocol,
     *,
     margin: float = _LOOKAHEAD_DECISIVE_MARGIN,
+    blocks: list[DocBlock] | None = None,
 ) -> tuple[list[EnsembleWord], str]:
     """Pick the best-scoring candidate word window for an ambiguous
     prefix-collision candidate (see ``MockDictionaryStoreProtocol
@@ -296,13 +329,26 @@ def _resolve_maximal_munch_window(
     is preferred by default, and only a decisive (>margin) score
     advantage for a shorter one overrides that bias.
 
+    When ``blocks`` contains table cells, extension words are restricted
+    to the cell that owns the original match so a prefix like
+    ``"Standard Chartered"`` cannot swallow the next column.
+
     Returns:
         ``(words, joined_text)`` for the chosen window. Falls back to
         ``matched_words`` unchanged (as ``(matched_words, joined_text)``)
         when there's nothing to search (``matched_words`` empty/singleton
         with no extension available).
     """
-    windows = _build_window_candidates(matched_words, ensemble_words)
+    origin_cell = None
+    if blocks and matched_words:
+        seed = union_bbox(matched_words)
+        if seed is not None:
+            origin_cell = _enclosing_cell_bbox(
+                seed, blocks, word_bboxes=[w.bbox for w in matched_words]
+            )
+    windows = _build_window_candidates(
+        matched_words, ensemble_words, origin_cell=origin_cell
+    )
     if not windows:
         return matched_words, " ".join(w.text for w in matched_words)
 
@@ -323,6 +369,33 @@ _NAME_SHAPED_RE = re.compile(r"[A-Za-z][A-Za-z'\-]+")
 _SPILLOVER_ROW_OVERLAP_FRACTION = 0.5
 _SPILLOVER_MAX_GAP_FACTOR = 1.5
 _SPILLOVER_COVERAGE_THRESHOLD = 0.5
+
+
+def _char_ranges_overlap(start: int, end: int, claimed: list[tuple[int, int]]) -> bool:
+    """True if ``[start, end)`` overlaps any already-claimed char range."""
+    return any(start < claimed_end and end > claimed_start for claimed_start, claimed_end in claimed)
+
+
+def _redaction_boxes_conflict(
+    a: BBox, b: BBox, threshold: float = _PADDED_OVERLAP_SKIP_THRESHOLD
+) -> bool:
+    """True when either box is substantially covered by the other.
+
+    Catches both near-duplicate patches (high IoU) and a later oversized
+    box that fully contains an earlier, tighter one — the dictionary-scan
+    + maximal-munch failure mode that stacked a second patch over an
+    already-redacted table cell.
+    """
+    return (
+        _bbox_overlap_fraction(a, b) >= threshold
+        or _bbox_overlap_fraction(b, a) >= threshold
+    )
+
+
+def _padded_overlaps_existing(
+    padded: BBox, existing: list[RedactionRegion]
+) -> bool:
+    return any(_redaction_boxes_conflict(padded, region.padded_bbox) for region in existing)
 
 
 def _is_name_shaped(word: EnsembleWord) -> bool:
@@ -733,11 +806,11 @@ class RedactPipeline:
         ledger_rows: list[dict] = []
         brand_zone_dicts: list[dict] = []
         region_counter = region_start
-        # Keyed on the physical padded box only (not entity_type): more than
-        # one detection source (field-anchored, dictionary-scan, a custom
-        # term) can independently land on the exact same underlying text —
-        # this must still only ever paint/log one redaction for it.
-        seen_keys: set[tuple[int, int, int, int]] = set()
+        # One physical patch per underlying text: field-anchored,
+        # dictionary-scan, and custom terms can independently land on the
+        # same words. Exact-coordinate keys miss near-duplicates (a cell
+        # box vs. a slightly expanded union), so overlap is checked
+        # against already-accepted page_redactions instead.
 
         self._upsert_custom_overrides(opts)
 
@@ -782,12 +855,25 @@ class RedactPipeline:
                 # "A/C Name:" field) even on a document shape field_extractor
                 # doesn't recognize. Can only ever match text that's already
                 # known; it never discovers brand-new unseen PII on its own.
-                # Runs last (lowest priority): field-anchored and explicit
-                # custom-term spans above already claim their own physical
-                # boxes via seen_keys, so this only ever fills in text those
-                # more specific detectors didn't already cover.
-                for entry in self.mock_store.list():
+                # Longest match wins: a short alias ("Standard Chartered",
+                # "SCB") nested inside a longer curated name is skipped so
+                # we don't paint two overlapping patches. Custom-term char
+                # ranges are claimed first; field-anchored geometry is
+                # de-duplicated later via padded-box overlap because a
+                # table cell's words are often non-contiguous in
+                # merged_text.
+                claimed_char_ranges = [
+                    (span.start, span.end) for span in spans if not span.words
+                ]
+                for entry in sorted(
+                    self.mock_store.list(),
+                    key=lambda e: len(e.source_text),
+                    reverse=True,
+                ):
                     for start, end in find_term_spans(merged_text, entry.source_text):
+                        if _char_ranges_overlap(start, end, claimed_char_ranges):
+                            continue
+                        claimed_char_ranges.append((start, end))
                         spans.append(
                             _SpanCandidate(start, end, "KNOWN_TERM", 0.95, None, None, None)
                         )
@@ -821,7 +907,10 @@ class RedactPipeline:
                         normalized_candidate
                     ):
                         matched_words, source_text = _resolve_maximal_munch_window(
-                            matched_words, ensemble_words, self.mock_store
+                            matched_words,
+                            ensemble_words,
+                            self.mock_store,
+                            blocks=state.blocks,
                         )
                         bbox = union_bbox(matched_words)
 
@@ -847,10 +936,8 @@ class RedactPipeline:
                     left_neighbor_x=left_neighbor_x,
                     right_neighbor_x=right_neighbor_x,
                 )
-                key = (canonical.page_index, padded.x, padded.y, padded.w)
-                if key in seen_keys:
+                if _padded_overlaps_existing(padded, page_redactions):
                     continue
-                seen_keys.add(key)
 
                 if not source_text.strip():
                     continue

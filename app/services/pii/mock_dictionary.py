@@ -302,10 +302,26 @@ class _InMemoryDictionary:
         self, normalized: str, resolved_mapping_id: str | None
     ) -> None:
         """Warn (mapping ids/counts only, never text — SEC-001) when a
-        resolution is ambiguous under ``find_prefix_collisions``."""
+        resolution is ambiguous under ``find_prefix_collisions``.
+
+        Alias rows that share the same ``mock_value`` (e.g. ``"SCB"`` and
+        ``"Standard Chartered Bank"`` both painting ``DSDC_Bank``) are not
+        a real ambiguity — either mapping produces the same redaction —
+        so they are omitted. Only a colliding entry with a *different*
+        mock is logged, which is the Maksima vs. Maksima Plus case the
+        maximal-munch probe then has to disambiguate.
+        """
         collisions = self.find_prefix_collisions(
             normalized, exclude_mapping_id=resolved_mapping_id
         )
+        if resolved_mapping_id is not None:
+            resolved = self._by_id.get(resolved_mapping_id)
+            if resolved is not None:
+                collisions = [
+                    entry
+                    for entry in collisions
+                    if entry.mock_value != resolved.mock_value
+                ]
         if collisions:
             logger.warning(
                 "mock_prefix_collision_detected mapping_id=%s colliding_mapping_ids=%s",
@@ -552,9 +568,17 @@ class MockDictionaryStore(_InMemoryDictionary):
         except json.JSONDecodeError as exc:
             raise ValueError("corrupt mock dictionary snapshot") from exc
         snapshot = _Snapshot.model_validate(payload)
+        skipped_dupes = 0
         for entry in snapshot.entries:
+            if entry.mapping_id in self._by_id:
+                skipped_dupes += 1
+                continue
             self._by_id[entry.mapping_id] = entry
             self._by_normalized[entry.normalized] = entry
+        if skipped_dupes:
+            logger.warning(
+                "mock_dictionary_duplicate_mapping_ids skipped=%s", skipped_dupes
+            )
 
     def _persist(self) -> None:
         snapshot = _Snapshot(
