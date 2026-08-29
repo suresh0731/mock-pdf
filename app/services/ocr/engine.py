@@ -41,7 +41,7 @@ async def ocr_page(image: Image.Image, tess_lang: str, langs: list[str]) -> Page
     if easyocr_available():
         tasks.append(loop.run_in_executor(None, ocr_image_easyocr, image, langs))
     if rapidocr_available():
-        tasks.append(loop.run_in_executor(None, ocr_image_rapidocr, image))
+        tasks.append(loop.run_in_executor(None, ocr_image_rapidocr, image, langs))
 
     if not tasks:
         raise RuntimeError("No OCR engines available. Install Tesseract.")

@@ -395,6 +395,34 @@ def test_resolve_logs_prefix_collision_warning_without_leaking_text(
     assert_no_pii_in_logs(caplog.text, "Blife Link Saham Maksima")
 
 
+def test_find_prefix_collisions_excludes_deliberate_hyphen_family(
+    store: MockDictionaryStore,
+) -> None:
+    """"DPLK AXA MANDIRI" plus its "... - PPIP PU" sibling is the mapping
+    table's own "PARENT - CHILD" sub-account convention for two
+    genuinely distinct accounts, not an accidental OCR truncation
+    (contrast with the plain-concatenation "Maksima"/"Maksima Plus" case
+    two tests above, which must still be flagged) — so it must not
+    appear as a collision at all.
+    """
+    store.upsert("DPLK AXA MANDIRI", "Client-000000009")
+    store.upsert("DPLK AXA MANDIRI - PPIP PU", "Client-30681373641")
+
+    assert store.find_prefix_collisions("dplk axa mandiri") == []
+    assert store.find_prefix_collisions("dplk axa mandiri - ppip pu") == []
+
+
+def test_resolve_no_collision_warning_for_deliberate_hyphen_family(
+    store: MockDictionaryStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    store.upsert("DPLK AXA MANDIRI", "Client-000000009")
+    store.upsert("DPLK AXA MANDIRI - PPIP PU", "Client-30681373641")
+
+    with caplog.at_level(logging.WARNING):
+        store.resolve("DPLK AXA MANDIRI")
+    assert "mock_prefix_collision_detected" not in caplog.text
+
+
 def test_resolve_no_collision_warning_for_unrelated_entries(
     store: MockDictionaryStore, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -402,3 +430,52 @@ def test_resolve_no_collision_warning_for_unrelated_entries(
     with caplog.at_level(logging.WARNING):
         store.resolve("PT BNI Life Insurance")
     assert "mock_prefix_collision_detected" not in caplog.text
+
+
+def test_resolve_no_collision_warning_for_same_mock_aliases(
+    store: MockDictionaryStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SCB vs Standard Chartered Bank both painting DSDC_Bank is an alias,
+    not an ambiguity — must not warn (or maximal-munch-extend) as a collision."""
+    store.upsert("SCB", "DSDC_Bank")
+    store.upsert("Standard Chartered Bank", "DSDC_Bank")
+    with caplog.at_level(logging.WARNING):
+        store.resolve("SCB")
+    assert "mock_prefix_collision_detected" not in caplog.text
+
+
+def test_load_skips_duplicate_mapping_ids(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "version": 1,
+        "counters": {},
+        "entries": [
+            {
+                "mapping_id": "map_duped001",
+                "source_text": "Alpha Fund",
+                "normalized": "alpha fund",
+                "mock_value": "FUND_A",
+                "assignment_source": "user",
+                "hit_count": 7,
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "mapping_id": "map_duped001",
+                "source_text": "Alpha Fund",
+                "normalized": "alpha fund",
+                "mock_value": "FUND_A",
+                "assignment_source": "user",
+                "hit_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        ],
+    }
+    path = tmp_path / "dup.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        loaded = MockDictionaryStore(snapshot_path=path)
+    assert len(loaded.list()) == 1
+    assert loaded.list()[0].hit_count == 7
+    assert "mock_dictionary_duplicate_mapping_ids" in caplog.text

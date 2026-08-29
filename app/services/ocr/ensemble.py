@@ -333,7 +333,7 @@ def _runner_fn(name: str):
 def _engine_call_args(name: str, image: Image.Image, tess_lang: str, langs: list[str]) -> tuple:
     if name == "tesseract":
         return (image, tess_lang)
-    if name == "easyocr":
+    if name in ("easyocr", "rapidocr"):
         return (image, langs)
     return (image,)
 

@@ -32,6 +32,7 @@ from app.models.redact import (
 )
 from app.pipeline.redact import RedactPipeline, _user_mock_for_term
 from app.services.ocr.ensemble_types import EnsembleWord
+from app.services.ocr.page_renderer import RenderedPage
 from app.services.pii.mock_dictionary import MockDictionaryStore
 from app.services.redact.audit_store import AuditStore
 from app.services.redact.ledger_store import LedgerStore
@@ -110,7 +111,9 @@ def _clear_caches() -> None:
 @pytest.fixture
 def patch_ocr_pii(monkeypatch):
     monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", _fake_ocr)
-    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: [_letter_page()])
+    monkeypatch.setattr(
+        "app.pipeline.redact.load_pages", lambda *a, **k: [RenderedPage(image=_letter_page())]
+    )
     monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
 
 
@@ -278,6 +281,81 @@ def test_pipeline_unseen_custom_term_gets_auto_mock(tmp_path, monkeypatch, patch
     assert any(e.mock_value == custom.mock_value for e in store.list())
 
 
+# --- fuzzy dictionary-scan: clean-elsewhere + OCR-garbled-once -----------
+
+_FUZZY_ORG = "PT BNI Life Insurance"
+_FUZZY_MERGED = (
+    "Please contact PT BNI Life Insurance for details. "
+    "Also, PT BNf Life Ins\ufffdrance was noted below."
+)
+_CLEAN_TOKENS = ["PT", "BNI", "Life", "Insurance"]
+_GARBLED_TOKENS = ["PT", "BNf", "Life", "Ins\ufffdrance"]
+
+
+def _fuzzy_dictionary_words(page: int = 0) -> list[EnsembleWord]:
+    """One clean and one OCR-garbled occurrence of the same org name in
+    ``_FUZZY_MERGED``, each split into per-token words with matching char
+    offsets — reproduces a dictionary entry that's exact-matched in most
+    of a document but garbled in one spot (e.g. a signature block).
+
+    Pixel x is char offset scaled by the same 8px/char used for width, so
+    two occurrences at different char offsets never end up spatially
+    overlapping just because of how this fixture maps text to pixels —
+    that would spuriously merge them into one padded box downstream and
+    defeat the point of asserting on two separate regions.
+    """
+    words: list[EnsembleWord] = []
+    search_from = 0
+    for tokens in (_CLEAN_TOKENS, _GARBLED_TOKENS):
+        cursor = search_from
+        for token in tokens:
+            start = _FUZZY_MERGED.index(token, cursor)
+            end = start + len(token)
+            words.append(
+                EnsembleWord(
+                    text=token,
+                    bbox=BBox(x=40 + start * 8, y=200, w=len(token) * 8, h=18),
+                    ocr_confidence=0.9,
+                    engine_agreement=1.0,
+                    engines=["tesseract"],
+                    page=page,
+                    char_start=start,
+                    char_end=end,
+                )
+            )
+            cursor = end
+        search_from = cursor
+    return words
+
+
+async def _fake_ocr_fuzzy_dictionary(*args, **kwargs):
+    page = args[1] if len(args) > 1 else 0
+    return _FUZZY_MERGED, _fuzzy_dictionary_words(page), []
+
+
+def test_fuzzy_dictionary_scan_finds_garbled_occurrence_despite_clean_one(
+    tmp_path, monkeypatch
+):
+    """A dictionary entry that's exact-matched cleanly once on the page
+    must still be found a second time where it's OCR-garbled — the clean
+    hit must not shadow/consume the fuzzy pass for the same entry (see
+    RedactPipeline._collect_redactions / _mask_claimed_ranges)."""
+    monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", _fake_ocr_fuzzy_dictionary)
+    monkeypatch.setattr(
+        "app.pipeline.redact.load_pages", lambda *a, **k: [RenderedPage(image=_letter_page())]
+    )
+    monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
+
+    pipeline, store, _ = _pipeline(tmp_path, monkeypatch, seed=False)
+    store.resolve(_FUZZY_ORG)
+    entry = store.lookup(_FUZZY_ORG)
+
+    _, audit, _ = _run(pipeline)
+    matches = [r for r in audit.redactions if r.mapping_id == entry.mapping_id]
+    assert {r.entity_type for r in matches} == {"KNOWN_TERM", "KNOWN_TERM_FUZZY"}
+    assert len(matches) == 2
+
+
 def test_structure_extraction_receives_original_not_line_stripped_image(tmp_path, monkeypatch):
     """Docling/img2table must see the pristine scan, not the line-stripped
     canonical image OCR uses — strip_table_lines erases essentially every
@@ -293,7 +371,7 @@ def test_structure_extraction_receives_original_not_line_stripped_image(tmp_path
         captured["image"] = image
         return []
 
-    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: [page])
+    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: [RenderedPage(image=page)])
     monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", _fake_ocr)
     monkeypatch.setattr("app.pipeline.redact.extract_structure", _record_structure)
     monkeypatch.setattr("app.pipeline.redact.extract_table_geometry", lambda *a, **k: [])

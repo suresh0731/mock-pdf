@@ -77,6 +77,9 @@ class RedactionRegion(BaseModel):
     assignment_source: Literal["auto", "user", "brand"] = "auto"
 
 
+PageKind = Literal["digital", "scanned"]
+
+
 class PageAuditSummary(BaseModel):
     page: int
     blur_tier: BlurTier
@@ -85,6 +88,9 @@ class PageAuditSummary(BaseModel):
     ensemble_word_count: int
     docling_block_count: int
     redaction_count: int
+    # "digital": native PDF text layer used, OCR skipped for this page.
+    # "scanned": ensemble OCR ran. See app/services/ocr/native_text.py.
+    page_kind: PageKind = "scanned"
 
 
 class RedactAuditResponse(BaseModel):

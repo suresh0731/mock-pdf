@@ -13,6 +13,8 @@ dictionary rows (mock_dictionary). Never logs the compared text (SEC-001).
 
 from __future__ import annotations
 
+import re
+
 from rapidfuzz import fuzz
 
 
@@ -66,6 +68,41 @@ def is_token_subset_collision(a: str, b: str, *, min_ratio: float = 1.0) -> bool
     on the shared tokens.
     """
     return token_set_ratio(a, b) >= min_ratio
+
+
+_FAMILY_SUFFIX_RE = re.compile(r"\s*-\s*\S")
+
+
+def is_deliberate_family_pair(a: str, b: str) -> bool:
+    """True when one string is the other plus a hyphen-delimited suffix.
+
+    Some mapping tables use a "PARENT - CHILD" naming convention for
+    genuinely distinct sub-accounts under one umbrella name (e.g.
+    ``"dplk axa mandiri"`` / ``"dplk axa mandiri - ppip pu"``) — a
+    *deliberate* family relationship, not an accidental OCR truncation
+    of the same entity. Only a delimiter-bounded continuation counts:
+    plain concatenation (e.g. ``"maksima"`` / ``"maksima plus"``) is
+    exactly the accidental-truncation shape this must not match, since
+    text shape alone can't otherwise distinguish "a truncated read of a
+    longer known name" from "a deliberately shorter but equally valid
+    name" — that's what ``is_token_subset_collision`` still exists to
+    flag as ambiguous. This narrower, delimiter-bounded check is a
+    carve-out for the specific case where the mapping table's own
+    naming convention already answers the question.
+
+    Args:
+        a: First string, already normalized (see ``normalize_source``)
+            — never logged.
+        b: Second string, already normalized — never logged.
+
+    Returns:
+        ``True`` if the shorter is a hyphen-delimited prefix of the
+        longer.
+    """
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if not shorter or not longer.startswith(shorter):
+        return False
+    return bool(_FAMILY_SUFFIX_RE.match(longer[len(shorter) :]))
 
 
 def best_fuzzy_match(

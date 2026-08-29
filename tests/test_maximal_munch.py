@@ -76,6 +76,37 @@ def test_nearest_extension_word_prefers_nearest_of_several_row_candidates():
     assert _nearest_extension_word(bbox, [far, near], excluded_ids=set()) is near
 
 
+def test_nearest_extension_word_ignores_far_same_row_neighbor():
+    """A word several columns away is the next cell, not a continuation."""
+    bbox = BBox(x=0, y=20, w=30, h=10)
+    far = _word("Amount", 200, 20)
+    assert _nearest_extension_word(bbox, [far], excluded_ids=set()) is None
+
+
+def test_nearest_extension_word_ignores_word_outside_origin_cell():
+    bbox = BBox(x=0, y=20, w=30, h=10)
+    neighbor = _word("Plus", 40, 20)
+    origin_cell = BBox(x=0, y=18, w=35, h=14)
+    assert (
+        _nearest_extension_word(
+            bbox, [neighbor], excluded_ids=set(), origin_cell=origin_cell
+        )
+        is None
+    )
+
+
+def test_nearest_extension_word_keeps_in_cell_neighbor():
+    bbox = BBox(x=0, y=20, w=30, h=10)
+    plus = _word("Plus", 40, 20)
+    origin_cell = BBox(x=0, y=18, w=90, h=14)
+    assert (
+        _nearest_extension_word(
+            bbox, [plus], excluded_ids=set(), origin_cell=origin_cell
+        )
+        is plus
+    )
+
+
 # --- _build_window_candidates --------------------------------------------
 
 
@@ -121,7 +152,7 @@ def test_build_window_candidates_no_trim_for_single_word_input():
 
 def test_resolve_prefers_longer_window_within_margin():
     maksima = _word("Maksima", 0, 20)
-    plus = _word("Plus", 100, 20)
+    plus = _word("Plus", 40, 20)
     store = _FakeStore({"maksima": 0.8, "maksima plus": 1.0})
     words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
     assert text == "Maksima Plus"
@@ -130,7 +161,7 @@ def test_resolve_prefers_longer_window_within_margin():
 
 def test_resolve_picks_decisively_better_shorter_window_over_longer():
     maksima = _word("Maksima", 0, 20)
-    plus = _word("Plus", 100, 20)
+    plus = _word("Plus", 40, 20)
     store = _FakeStore({"maksima": 1.0, "maksima plus": 0.5})
     words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
     assert text == "Maksima"
@@ -152,9 +183,37 @@ def test_resolve_falls_back_to_original_when_no_windows():
     assert text == ""
 
 
-def test_resolve_ties_break_toward_longer_window():
-    maksima = _word("Maksima", 0, 20)
-    plus = _word("Plus", 100, 20)
-    store = _FakeStore({"maksima": 1.0, "maksima plus": 1.0})
-    words, text = _resolve_maximal_munch_window([maksima], [maksima, plus], store)
-    assert text == "Maksima Plus"
+def test_resolve_does_not_extend_into_neighboring_table_cell():
+    """Prefix collision must not union the next column into this patch."""
+    from app.services.structure.docling_adapter import DocBlock
+
+    name = _word("Standard", 0, 20, w=50)
+    chartered = _word("Chartered", 55, 20, w=50)
+    amount = _word("1000000", 200, 20, w=60)
+    name_cell = DocBlock(
+        block_id="c-name",
+        block_type="cell",
+        bbox=BBox(x=0, y=18, w=120, h=14),
+        text="",
+    )
+    amount_cell = DocBlock(
+        block_id="c-amt",
+        block_type="cell",
+        bbox=BBox(x=180, y=18, w=90, h=14),
+        text="",
+    )
+    store = _FakeStore(
+        {
+            "standard": 1.0,
+            "standard chartered": 1.0,
+            "standard chartered 1000000": 0.98,
+        }
+    )
+    words, text = _resolve_maximal_munch_window(
+        [name],
+        [name, chartered, amount],
+        store,
+        blocks=[name_cell, amount_cell],
+    )
+    assert "1000000" not in text
+    assert words[-1] is chartered

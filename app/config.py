@@ -79,6 +79,21 @@ class Settings(BaseSettings):
     # per-request custom terms are for); it only ever matches text that's
     # already in the dictionary.
     dictionary_scan_enabled: bool = True
+    # Fallback for a dictionary_scan_enabled entry with zero exact hits: a
+    # single OCR-garbled character (misread letter, a garbled/replacement
+    # glyph) breaks find_term_spans's exact match entirely, so this locates
+    # the single best-aligned approximate span instead (see
+    # app/services/pii/custom_redact.py's find_fuzzy_term_spans, backed by
+    # rapidfuzz — already a dependency, already used for this document
+    # type's fuzzy *resolution*; this just applies it to span *discovery*).
+    # Only runs for entries the exact pass didn't already find, so cost
+    # stays bounded to the dictionary's "not found exactly" remainder.
+    fuzzy_dictionary_scan_enabled: bool = True
+    # Curated dictionary entries are verified ground truth (same trust
+    # level mock_dictionary's own fuzzy resolution already extends them —
+    # see _TRUSTED_FUZZY_THRESHOLD there), so this uses the same threshold
+    # rather than fuzzy_match_threshold's stricter auto-vs-auto default.
+    fuzzy_dictionary_scan_threshold: float = 0.65
     # Restricts field-anchored detection to values already in the mock
     # dictionary — no brand-new auto-created entries for text nothing
     # matches. Table-cell OCR is noisy enough that free-running detection
@@ -139,6 +154,23 @@ class Settings(BaseSettings):
     # left exposed as bare, readable text. Never creates a new redaction or
     # dictionary entry — purely extends an existing one's bounds.
     spillover_safety_net_enabled: bool = True
+    # Comma-separated (case-insensitive) words the spillover safety net
+    # never absorbs even though they satisfy its shape check (capitalized,
+    # alphabetic — the same shape a genuinely dropped name continuation
+    # takes, e.g. "Plus" completing "Maksima Plus"). These are common
+    # document-boilerplate/tax abbreviations that routinely sit right next
+    # to a redacted name or account field in these statements (e.g. a
+    # "DPP"/"PPN" tax-base line beside a fund name) but are never
+    # themselves part of the adjacent PII — unlike a real fund-name
+    # continuation word, they're a closed, enumerable set, so an explicit
+    # skip-list is safer here than a fuzzy-score heuristic (which can't
+    # reliably tell "Plus" apart from "DPP": both are short words that
+    # measurably lower the match ratio when appended, so a score-based
+    # gate would risk rejecting genuine continuations too).
+    spillover_non_name_stopwords: str = (
+        "DPP,PPN,NPWP,VAT,GST,REF,NO,ATTN,ATTENTION,CC,FAX,TELP,PHONE,EMAIL,"
+        "PAGE,ENC,ENCL"
+    )
 
     # --- Deterministic OCR engine policy -----------------------------------
     # Default path: exactly one engine's output is used per page, chosen
@@ -170,6 +202,27 @@ class Settings(BaseSettings):
     # logs a loud warning instead. Set True for CI/production so a machine
     # silently missing an engine can never serve traffic.
     ocr_strict_engine_check: bool = False
+
+    # --- Native-text bypass (skip OCR on digital/copyable-text pages) ------
+    # For a PDF page that already carries a real, selectable text layer,
+    # re-OCRing a rasterized image of it is both wasteful and strictly less
+    # accurate than reading the text the PDF already stores (see
+    # app/services/ocr/native_text.py). Classification runs independently
+    # per page, so mixed documents (e.g. a copyable cover page followed by
+    # scanned pages) are handled automatically — no per-document flag
+    # needed. Non-PDF input (jpg/png/tiff) and the pdf2image fallback path
+    # (used only if PyMuPDF itself fails to render the file) have no native
+    # text layer to read and always fall through to OCR, identical to
+    # pre-bypass behavior.
+    native_text_bypass_enabled: bool = True
+    # Minimum extractable word count for a page to qualify as "digital".
+    native_text_min_words: int = 20
+    # Minimum fraction of the page area covered by native text blocks to
+    # qualify as "digital". Required in addition to native_text_min_words
+    # so a scanned page carrying a thin/misaligned OCR text layer already
+    # baked in by a prior scan-to-PDF step (a few words, near-zero
+    # coverage) still falls through to real OCR instead of being trusted.
+    native_text_min_coverage_pct: float = 0.02
 
     # --- Folder-watch ingestion (extension, alongside UI/API upload) -------
     # Polls `watch_input_dir` for new files and redacts them one at a time

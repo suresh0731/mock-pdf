@@ -195,3 +195,44 @@ def test_pdf_metadata_title_is_sanitized():
         assert doc.metadata["title"] == "invoice.pdf"
     finally:
         doc.close()
+
+
+def test_default_jpeg_output_is_much_smaller_than_png():
+    """Regression guard for the 200KB-in/22MB-out size blowup: a
+    lossless-PNG-embedded page is many times larger than the same page
+    saved as JPEG, so the default must stay "jpeg"."""
+    page = _page(800, 1000, "white")
+    region = _region(x=100, y=100, w=300, h=40)
+    jpeg_pdf = render_redacted_pdf([page], [region], "doc.pdf", image_format="jpeg")
+    png_pdf = render_redacted_pdf([page], [region], "doc.pdf", image_format="png")
+    assert len(jpeg_pdf) < len(png_pdf)
+
+
+def test_png_format_still_supported_for_lossless_output():
+    page = _page()
+    page.paste((255, 0, 0), [10, 20, 90, 44])
+    region = _region(x=10, y=20, w=80, h=24)
+    pdf = render_redacted_pdf([page], [region], "doc.pdf", image_format="png")
+    img = _pdf_to_image(pdf)
+    pixel = img.getpixel((12, 22))
+    assert all(channel > 230 for channel in pixel)
+
+
+def test_unknown_image_format_falls_back_to_jpeg(caplog):
+    page = _page()
+    with caplog.at_level(logging.WARNING, logger="app.services.redact.pdf_renderer"):
+        pdf = render_redacted_pdf([page], [], "doc.pdf", image_format="bmp")
+    assert "unknown_redact_image_format" in caplog.text
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        assert len(doc) == 1
+    finally:
+        doc.close()
+
+
+def test_jpeg_quality_affects_output_size():
+    page = _page(800, 1000, "white")
+    region = _region(x=100, y=100, w=300, h=40)
+    low_quality = render_redacted_pdf([page], [region], "doc.pdf", jpeg_quality=10)
+    high_quality = render_redacted_pdf([page], [region], "doc.pdf", jpeg_quality=95)
+    assert len(low_quality) < len(high_quality)

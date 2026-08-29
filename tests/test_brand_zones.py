@@ -1,7 +1,12 @@
 import logging
 
 from app.models.pii_chunk import BBox
-from app.services.pii.brand_zones import BrandZone, detect_brand_zones, detect_picture_zones
+from app.services.pii.brand_zones import (
+    BrandZone,
+    detect_brand_zones,
+    detect_picture_zones,
+    reconcile_picture_zones_with_text,
+)
 from app.services.structure.docling_adapter import DocBlock
 
 
@@ -199,3 +204,65 @@ def test_detect_picture_zones_logs_omit_block_text(caplog):
     with caplog.at_level(logging.DEBUG, logger="app.services.pii.brand_zones"):
         detect_picture_zones(720, 1100, page=0, blocks=[block])
     assert secret not in caplog.text
+
+
+def test_detect_picture_zones_skips_picture_inside_table_cell():
+    """Bank-column logos sit in a cell; the word patch already covers them."""
+    cell = _block("cell", BBox(x=400, y=200, w=80, h=24), "")
+    logo = _block("picture", BBox(x=410, y=204, w=40, h=16), "scb-logo")
+    zones = detect_picture_zones(720, 1100, page=0, blocks=[cell, logo])
+    assert zones == []
+
+
+def test_detect_picture_zones_keeps_picture_outside_cells():
+    cell = _block("cell", BBox(x=400, y=200, w=80, h=24), "")
+    stamp = _block("picture", BBox(x=100, y=500, w=200, h=150), "stamp")
+    zones = detect_picture_zones(720, 1100, page=0, blocks=[cell, stamp])
+    assert len(zones) == 1
+    assert _xywh(zones[0]) == (100, 500, 200, 150)
+
+
+# --- reconcile_picture_zones_with_text -----------------------------------
+
+
+def _picture_zone(x: int, y: int, w: int, h: int) -> BrandZone:
+    return BrandZone(zone="picture", page=0, bbox=BBox(x=x, y=y, w=w, h=h), label="IMAGE")
+
+
+def test_reconcile_leaves_footer_unchanged():
+    footer = BrandZone(zone="footer", page=0, bbox=BBox(x=0, y=968, w=720, h=132), label="FOOTER")
+    word = BBox(x=10, y=980, w=80, h=16)
+    assert reconcile_picture_zones_with_text([footer], [word]) == [footer]
+
+
+def test_reconcile_skips_picture_mostly_overlapping_word_patch():
+    """Tiny bank logo sitting on DSDC_Bank — IMAGE would paint over the mock."""
+    picture = _picture_zone(10, 10, 30, 16)
+    word = BBox(x=8, y=8, w=80, h=20)
+    assert reconcile_picture_zones_with_text([picture], [word]) == []
+
+
+def test_reconcile_keeps_picture_when_word_is_inside_it():
+    """OCR of logo text is a small word inside a large stamp — IMAGE covers it."""
+    picture = _picture_zone(100, 500, 200, 150)
+    word_inside = BBox(x=140, y=560, w=40, h=16)
+    result = reconcile_picture_zones_with_text([picture], [word_inside])
+    assert len(result) == 1
+    assert _xywh(result[0]) == (100, 500, 200, 150)
+
+
+def test_reconcile_clips_picture_off_adjacent_word_patch():
+    """Signature IMAGE overlapping the mocked name below it is shrunk up."""
+    picture = _picture_zone(100, 400, 120, 80)
+    name_below = BBox(x=100, y=460, w=120, h=20)
+    result = reconcile_picture_zones_with_text([picture], [name_below])
+    assert len(result) == 1
+    box = result[0].bbox
+    assert box.y == 400
+    assert box.y + box.h <= name_below.y
+    assert box.h == 60
+
+
+def test_reconcile_empty_text_boxes_returns_zones_unchanged():
+    picture = _picture_zone(100, 500, 200, 150)
+    assert reconcile_picture_zones_with_text([picture], []) == [picture]

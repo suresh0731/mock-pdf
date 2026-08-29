@@ -24,7 +24,11 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.models.mock import MockEntry, MockMappingNotFound, MockValidationError
-from app.services.pii.name_matcher import is_token_subset_collision, token_sort_ratio
+from app.services.pii.name_matcher import (
+    is_deliberate_family_pair,
+    is_token_subset_collision,
+    token_sort_ratio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +281,17 @@ class _InMemoryDictionary:
         words), which lives where that geometry is available
         (``field_extractor``/``redact`` pipeline), not here.
 
+        A pair matching ``is_deliberate_family_pair`` (the longer entry
+        is the shorter one plus a hyphen-delimited suffix, e.g. "dplk
+        axa mandiri" / "dplk axa mandiri - ppip pu") is excluded
+        entirely rather than flagged: a mapping table that names dozens
+        of genuinely distinct sub-accounts this way would otherwise have
+        roughly half its rows collide with each other by construction
+        (every "PARENT - CHILD" row collides with its "PARENT" row and
+        every sibling "PARENT - OTHER_CHILD" row), burying the rare,
+        actually-ambiguous case (e.g. "Maksima" vs. "Maksima Plus",
+        plain concatenation with no delimiter) in noise.
+
         Args:
             normalized: Already-normalized candidate text (see
                 ``normalize_source``).
@@ -296,6 +311,7 @@ class _InMemoryDictionary:
                 if entry.mapping_id != exclude_mapping_id
                 and entry.normalized != normalized
                 and is_token_subset_collision(normalized, entry.normalized)
+                and not is_deliberate_family_pair(normalized, entry.normalized)
             ]
 
     def _log_prefix_collision_if_any(
@@ -309,7 +325,11 @@ class _InMemoryDictionary:
         a real ambiguity — either mapping produces the same redaction —
         so they are omitted. Only a colliding entry with a *different*
         mock is logged, which is the Maksima vs. Maksima Plus case the
-        maximal-munch probe then has to disambiguate.
+        maximal-munch probe then has to disambiguate. A deliberate
+        base+suffix family member (see ``find_prefix_collisions``'s
+        ``_is_deliberate_family_pair`` filter) never reaches here at all
+        — it's excluded from the collision list itself, not filtered out
+        by this method.
         """
         collisions = self.find_prefix_collisions(
             normalized, exclude_mapping_id=resolved_mapping_id

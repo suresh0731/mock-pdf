@@ -192,7 +192,8 @@ async def ocr_only(file: UploadFile = File(...), locale: str | None = Form(None)
     content = await file.read()
     pages = load_pages(content, file.filename or "upload")
     page_results = []
-    for i, page in enumerate(pages):
+    for i, rendered in enumerate(pages):
+        page = rendered.image
         tier, variance = detect_blur_tier(page)
         merged, words, engines = await ensemble_ocr_page(page, i, "eng", ["en"])
         page_results.append(

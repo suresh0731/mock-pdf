@@ -80,16 +80,67 @@ def test_apply_padding_clamps_to_cell_bbox_instead_of_page():
 def test_apply_padding_hard_clips_ocr_overflow_to_cell():
     """An OCR/union bbox that spilled into the neighboring column must
     shrink back into the assigned cell so the painted patch cannot cover
-    the neighbor's value (e.g. USD amount next to a name cell)."""
+    the neighbor's value (e.g. USD amount next to a name cell) — but the
+    vertical extent must still fully cover bbox; only the horizontal
+    spillover is ever hard-clipped below bbox's own extent."""
     bbox = BBox(x=10, y=20, w=90, h=16)  # overflows well left of the cell
     cell = BBox(x=40, y=18, w=50, h=22)
     padded = apply_padding(bbox, "good", page_w=400, page_h=200, cell_bbox=cell)
     margin = _CELL_CLAMP_MARGIN_PX
 
     assert padded.x >= cell.x + margin
-    assert padded.y >= cell.y + margin
     assert padded.x + padded.w <= cell.x + cell.w - margin
-    assert padded.y + padded.h <= cell.y + cell.h - margin
+    assert padded.y <= bbox.y
+    assert padded.y + padded.h >= bbox.y + bbox.h
+
+
+def test_apply_padding_never_clips_below_bbox_vertically_even_when_cell_is_short():
+    """Regression: a cell a few px shorter than the word union it's
+    matched to (e.g. img2table under-measuring a tightly-spaced,
+    multi-line row) must never cause the painted box to cut into the
+    real text's top/bottom edge — only the added padding may shrink."""
+    bbox = BBox(x=811, y=412, w=81, h=82)
+    cell = BBox(x=790, y=414, w=122, h=78)  # shorter than bbox itself
+    padded = apply_padding(bbox, "good", page_w=2000, page_h=2000, cell_bbox=cell)
+
+    assert padded.y <= bbox.y
+    assert padded.y + padded.h >= bbox.y + bbox.h
+
+
+def test_apply_padding_never_clips_below_bbox_horizontally_when_bbox_fits_cell():
+    """Regression: when bbox already fits inside the cell horizontally,
+    the border-line safety margin must only reduce the padding, never
+    cut into text sitting flush against the cell's own edge."""
+    bbox = BBox(x=562, y=426, w=163, h=54)
+    cell = BBox(x=562, y=414, w=228, h=78)  # same left edge as bbox
+    padded = apply_padding(bbox, "good", page_w=2000, page_h=2000, cell_bbox=cell)
+
+    assert padded.x <= bbox.x
+    assert padded.x + padded.w >= bbox.x + bbox.w
+
+
+def test_apply_padding_multiline_skips_top_bottom_padding():
+    bbox = BBox(x=20, y=20, w=100, h=50)
+    padded = apply_padding(bbox, "severe", page_w=500, page_h=500, multiline=True)
+
+    assert padded.y == bbox.y
+    assert padded.y + padded.h == bbox.y + bbox.h
+    # Left/right padding is unaffected.
+    assert padded.x == bbox.x - 12
+    assert padded.x + padded.w == bbox.x + bbox.w + 12
+
+
+def test_apply_padding_multiline_still_covers_bbox_with_cell_clamp():
+    bbox = BBox(x=562, y=426, w=163, h=54)
+    cell = BBox(x=562, y=414, w=228, h=78)
+    padded = apply_padding(
+        bbox, "good", page_w=2000, page_h=2000, cell_bbox=cell, multiline=True
+    )
+
+    assert padded.y <= bbox.y
+    assert padded.y + padded.h >= bbox.y + bbox.h
+    assert padded.x <= bbox.x
+    assert padded.x + padded.w >= bbox.x + bbox.w
 
 
 def test_apply_padding_ignores_non_overlapping_cell():

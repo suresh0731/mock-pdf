@@ -124,26 +124,77 @@ def rapidocr_available() -> bool:
         return False
 
 
-_rapidocr_engine = None
+# RapidOCR's recognition model is single-language-per-instance (unlike
+# Tesseract's `eng+ind`-style combined pass), so a distinct engine instance
+# is cached per (Det.lang_type, Rec.lang_type) pair actually requested —
+# see _rapidocr_lang_params. The app only ever resolves a handful of
+# distinct locales (app/services/locale/resolver.py's LOCALE_LANG_MAP), so
+# this cache stays small and bounded.
+_rapidocr_engines: dict[tuple[str, str], object] = {}
+
+# Maps the app's internal language codes (see LOCALE_LANG_MAP) to RapidOCR's
+# Rec.lang_type. RapidOCR (>=3.9, PP-OCRv6) supports these as discrete
+# recognition-model choices; "en"/"ch" are its own defaults and don't need
+# an entry here.
+_RAPIDOCR_REC_LANG = {
+    "id": "id",
+    "ms": "ms",
+    "ch_sim": "ch",
+    "ch_tra": "chinese_cht",
+}
 
 
-def _get_rapidocr_engine():
-    """Lazily construct a process-wide RapidOCR singleton.
+def _rapidocr_lang_params(langs: list[str] | None) -> tuple[str, str]:
+    """Map resolved locale languages to RapidOCR's (Det, Rec) lang_type.
+
+    RapidOCR can only recognize one language per instance, so this picks a
+    single representative language per document locale rather than
+    combining languages the way Tesseract's ``eng+ind`` does. When a
+    non-English language is present, it's preferred for ``Rec.lang_type``:
+    PP-OCRv6's Latin-multilingual/CJK models still read English text
+    reasonably well, whereas RapidOCR's *default* (English/Chinese-only)
+    model does not read Indonesian/Malay text at all — see
+    ``app/services/locale/resolver.py``'s ``LOCALE_LANG_MAP``.
+
+    Args:
+        langs: Resolved language codes for this document (e.g. ``["en",
+            "id"]``), or ``None``.
+
+    Returns:
+        ``(det_lang, rec_lang)``. Defaults to ``("en", "en")`` for an
+        English-only or unresolved locale — identical to RapidOCR's
+        pre-existing implicit default behavior for English documents.
+    """
+    for lang in langs or []:
+        rec = _RAPIDOCR_REC_LANG.get(lang)
+        if rec is not None:
+            det = "ch" if rec in ("ch", "chinese_cht") else "multi"
+            return det, rec
+    return "en", "en"
+
+
+def _get_rapidocr_engine(det_lang: str, rec_lang: str):
+    """Lazily construct one process-wide RapidOCR instance per language pair.
 
     RapidOCR's ONNX models load from files bundled inside the wheel (no
-    first-run network download, unlike PaddleOCR), so this is safe to cache
-    once per process. Constructing it per-call would reload the ONNX
-    sessions on every page.
+    first-run network download, unlike PaddleOCR), so each distinct
+    ``(det_lang, rec_lang)`` configuration is safe to cache for the life of
+    the process — constructing it per-call would reload the ONNX sessions
+    on every page.
     """
-    global _rapidocr_engine
-    if _rapidocr_engine is None:
+    key = (det_lang, rec_lang)
+    engine = _rapidocr_engines.get(key)
+    if engine is None:
         from rapidocr import RapidOCR
 
-        _rapidocr_engine = RapidOCR()
-    return _rapidocr_engine
+        engine = RapidOCR(params={"Det.lang_type": det_lang, "Rec.lang_type": rec_lang})
+        _rapidocr_engines[key] = engine
+    return engine
 
 
-def ocr_image_rapidocr(image: Image.Image) -> tuple[str, float, list[dict]]:
+def ocr_image_rapidocr(
+    image: Image.Image, langs: list[str] | None = None
+) -> tuple[str, float, list[dict]]:
     """Run RapidOCR (ONNX-converted PP-OCR models) and flatten to word dicts.
 
     Unlike PaddleOCR's ``predict()``/EasyOCR's ``readtext()`` (both of which
@@ -152,10 +203,18 @@ def ocr_image_rapidocr(image: Image.Image) -> tuple[str, float, list[dict]]:
     a tuple of ``(text, score, quad_box)`` word tuples — so no downstream
     character-width splitting is needed for this engine's output (see
     ``_split_multiword_tokens`` in ``field_extractor.py``).
+
+    Args:
+        image: Page image to run OCR on.
+        langs: Resolved locale languages (see ``resolve_languages``), used
+            to pick RapidOCR's recognition model via
+            :func:`_rapidocr_lang_params`. ``None``/unresolved defaults to
+            English, matching prior behavior.
     """
     import numpy as np
 
-    engine = _get_rapidocr_engine()
+    det_lang, rec_lang = _rapidocr_lang_params(langs)
+    engine = _get_rapidocr_engine(det_lang, rec_lang)
     result = engine(np.array(image), return_word_box=True)
     words = []
     texts = []

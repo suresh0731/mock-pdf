@@ -23,6 +23,7 @@ from app.models.pii_chunk import BBox
 from app.models.redact import RedactOptions
 from app.pipeline.redact import RedactPipeline
 from app.services.ocr.ensemble_types import EnsembleWord
+from app.services.ocr.page_renderer import RenderedPage
 from app.services.pii.mock_dictionary import MockDictionaryStore
 from app.services.redact.audit_store import AuditStore
 from app.services.redact.ledger_store import LedgerStore
@@ -130,7 +131,9 @@ def _pipeline(tmp_path: Path, monkeypatch) -> tuple[RedactPipeline, MockDictiona
         ledger_store=ledger_store,
         audit_store=AuditStore(),
     )
-    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: [_letter_page()])
+    monkeypatch.setattr(
+        "app.pipeline.redact.load_pages", lambda *a, **k: [RenderedPage(image=_letter_page())]
+    )
     monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
     return pipeline, mock_store, ledger_store
 

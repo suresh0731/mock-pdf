@@ -28,6 +28,7 @@ from app.pipeline.page_state import PageProcessState
 from app.services.locale.resolver import resolve_languages
 from app.services.ocr.ensemble import ensemble_ocr_page
 from app.services.ocr.ensemble_types import EnsembleWord
+from app.services.ocr.native_text import classify_and_extract
 from app.services.ocr.page_renderer import load_pages
 from app.services.pii.brand_zones import (
     BrandZone,
@@ -36,7 +37,7 @@ from app.services.pii.brand_zones import (
     reconcile_picture_zones_with_text,
 )
 from app.services.pii.coordinate_map import apply_padding, canonical_to_original
-from app.services.pii.custom_redact import find_term_spans
+from app.services.pii.custom_redact import find_fuzzy_term_spans, find_term_spans
 from app.services.pii.ensemble_mapper import (
     map_span_to_ensemble_bbox,
     union_bbox,
@@ -44,6 +45,7 @@ from app.services.pii.ensemble_mapper import (
 )
 from app.services.pii.field_extractor import extract_field_candidates
 from app.services.pii.mock_dictionary import normalize_source
+from app.services.pii.name_matcher import token_sort_ratio
 from app.services.pii.redaction_scorer import score_redaction
 from app.services.preprocess.canonical import CanonicalPage, canonicalize_page
 from app.services.redact.audit_store import AuditStore
@@ -381,6 +383,47 @@ def _char_ranges_overlap(start: int, end: int, claimed: list[tuple[int, int]]) -
     return any(start < claimed_end and end > claimed_start for claimed_start, claimed_end in claimed)
 
 
+# Placeholder used to blank out already-claimed text before a fuzzy scan
+# (see _mask_claimed_ranges). Never alphanumeric, so it can't itself read
+# as a plausible match for anything; repeating it (rather than any other
+# filler) keeps the masked text the same length so char offsets found in
+# it still index correctly into the original merged_text.
+_FUZZY_MASK_CHAR = "\x00"
+
+
+def _mask_claimed_ranges(text: str, claimed: list[tuple[int, int]]) -> str:
+    """Blank out ``claimed`` char ranges in ``text`` with a placeholder.
+
+    A dictionary entry that appears on a page both cleanly (already
+    exact-matched elsewhere, e.g. several clean table rows) and garbled
+    in one or more other spots (the case this masking exists for) must
+    still have those garbled occurrences found by the fuzzy pass — but
+    ``find_fuzzy_term_spans`` only probes a bounded number of occurrences
+    per call, and a clean/near-exact occurrence always outscores a
+    garbled one, so it would win every one of those slots before a
+    different, still-uncaught garbled one ever got a turn. Masking every
+    already-claimed range (from exact matches, custom terms, and any
+    fuzzy match already accepted) before each fuzzy probe removes the
+    clean occurrences from contention entirely, so the whole per-entry
+    probe budget goes to text nothing has claimed yet.
+
+    Args:
+        text: Original merged page text (never logged).
+        claimed: Already-claimed ``(start, end)`` char ranges.
+
+    Returns:
+        Same length as ``text``, with every claimed range replaced by
+        ``_FUZZY_MASK_CHAR``. Unclaimed text is returned unchanged.
+    """
+    if not claimed:
+        return text
+    chars = list(text)
+    for start, end in claimed:
+        for i in range(max(start, 0), min(end, len(chars))):
+            chars[i] = _FUZZY_MASK_CHAR
+    return "".join(chars)
+
+
 def _redaction_boxes_conflict(
     a: BBox, b: BBox, threshold: float = _PADDED_OVERLAP_SKIP_THRESHOLD
 ) -> bool:
@@ -403,14 +446,23 @@ def _padded_overlaps_existing(
     return any(_redaction_boxes_conflict(padded, region.padded_bbox) for region in existing)
 
 
-def _is_name_shaped(word: EnsembleWord) -> bool:
+def _is_name_shaped(word: EnsembleWord, stopwords: frozenset[str] = frozenset()) -> bool:
     """True for an alphabetic, capitalized word — the shape a dropped
     name/org-name continuation actually takes (e.g. a stray "Plus"), as
     opposed to punctuation, bare digits, or a lowercase function word
     that's unlikely to itself be PII worth a fail-safe absorb.
+
+    ``stopwords`` (case-insensitive, see ``Settings.spillover_non_name_
+    stopwords``) excludes common document/tax abbreviations that are
+    *also* this exact shape (capitalized, alphabetic-only — e.g. "DPP",
+    "PPN") but are never themselves a name continuation, so they must
+    never be swallowed into a neighboring redaction no matter how close
+    they sit to one.
     """
     text = word.text.strip()
-    return bool(_NAME_SHAPED_RE.fullmatch(text)) and text[0].isupper()
+    if not (bool(_NAME_SHAPED_RE.fullmatch(text)) and text[0].isupper()):
+        return False
+    return text.upper() not in stopwords
 
 
 def _union_bboxes(a: BBox, b: BBox) -> BBox:
@@ -452,6 +504,7 @@ def _apply_spillover_safety_net(
     ensemble_words: list[EnsembleWord],
     blocks: list[DocBlock],
     canonical: CanonicalPage,
+    stopwords: frozenset[str] = frozenset(),
 ) -> None:
     """Absorb an orphaned name-shaped word into an adjacent redaction's
     bounding box, per the plan's spillover fail-safe: geometry fixes and
@@ -460,9 +513,15 @@ def _apply_spillover_safety_net(
     it never creates a new redaction or dictionary entry, only extends an
     existing region's bounds (canonical/original/padded bbox) to also
     cover the orphan. Mutates ``page_redactions`` in place.
+
+    ``stopwords`` (see ``_is_name_shaped``) keeps this net from also
+    swallowing a common document/tax abbreviation (e.g. "DPP") that
+    happens to sit right next to a redacted name/account field — that
+    shape check alone can't tell the two apart, since both are
+    capitalized, alphabetic-only words.
     """
     for word in ensemble_words:
-        if word.bbox.w <= 0 or word.bbox.h <= 0 or not _is_name_shaped(word):
+        if word.bbox.w <= 0 or word.bbox.h <= 0 or not _is_name_shaped(word, stopwords):
             continue
         if any(
             _bbox_overlap_fraction(word.bbox, r.canonical_bbox) >= _SPILLOVER_COVERAGE_THRESHOLD
@@ -506,6 +565,13 @@ def _apply_spillover_safety_net(
             left_neighbor_x = left_x + dx if left_x is not None else None
             right_neighbor_x = right_x + dx if right_x is not None else None
 
+        extended_words = [
+            w
+            for w in ensemble_words
+            if _bbox_overlap_fraction(w.bbox, extended_bbox) >= _SPILLOVER_COVERAGE_THRESHOLD
+        ]
+        multiline = len(_row_clusters(extended_words)) > 1 if extended_words else False
+
         target.canonical_bbox = extended_bbox
         target.original_bbox = canonical_to_original(extended_bbox, canonical.transform)
         target.padded_bbox = apply_padding(
@@ -516,8 +582,83 @@ def _apply_spillover_safety_net(
             cell_bbox=original_cell_bbox,
             left_neighbor_x=left_neighbor_x,
             right_neighbor_x=right_neighbor_x,
+            multiline=multiline,
         )
         target.engines_seen = sorted(set(target.engines_seen) | set(word.engines))
+
+
+_LINE_WRAP_ROW_Y_OVERLAP_FRACTION = 0.5
+# How much wider the combined union of a match's per-line word clusters
+# must be than the clusters' own widths added together before it's treated
+# as a genuine line-wrap split rather than compactly co-located text (see
+# _line_wrap_clusters).
+_LINE_WRAP_WASTE_RATIO = 1.6
+
+
+def _row_clusters(words: list[EnsembleWord]) -> list[list[EnsembleWord]]:
+    """Group ``words`` into visual-row clusters by vertical (y) overlap.
+
+    A lightweight local clustering pass — not table-aware like
+    ``field_extractor``'s ``_group_rows`` — used only to tell whether a
+    matched span's own words sit on one visual line or spill across more
+    than one (see ``_line_wrap_clusters``). Returned in top-to-bottom
+    reading order.
+    """
+    ordered = sorted(words, key=lambda w: (w.bbox.y, w.bbox.x))
+    clusters: list[list[EnsembleWord]] = []
+    for w in ordered:
+        for cluster in clusters:
+            cy1 = min(c.bbox.y for c in cluster)
+            cy2 = max(c.bbox.y + c.bbox.h for c in cluster)
+            overlap = min(cy2, w.bbox.y + w.bbox.h) - max(cy1, w.bbox.y)
+            if overlap > _LINE_WRAP_ROW_Y_OVERLAP_FRACTION * min(cy2 - cy1, w.bbox.h):
+                cluster.append(w)
+                break
+        else:
+            clusters.append([w])
+    clusters.sort(key=lambda c: min(x.bbox.y for x in c))
+    return clusters
+
+
+def _line_wrap_clusters(
+    matched_words: list[EnsembleWord],
+) -> list[list[EnsembleWord]] | None:
+    """Per-line word clusters when a matched span's own text wraps across
+    a real PDF line break — e.g. a name whose first word(s) sit at the
+    tail end of one line and whose remaining word(s) sit at the head of
+    the next — rather than the whole span living on a single visual row.
+
+    Painting one union box across both lines in that shape sweeps in
+    whatever unrelated text sits between the two clusters' horizontal
+    extents: the box's x-range runs from the second line's left-most
+    matched word to the first line's right-most one, i.e. nearly the full
+    line width on *both* lines, not just the matched words themselves.
+    Detected via a "waste ratio": if the combined union of the per-line
+    clusters is much wider than the clusters' own widths added together,
+    the words sit at opposite/extreme horizontal ends of adjacent lines
+    rather than compactly co-located, and the caller should paint one
+    tight box per line instead of a single union box (see
+    ``_collect_redactions``, which paints the mock value on only one of
+    the resulting boxes and a blank white patch on the rest).
+
+    Returns ``None`` when there's only one visual line, or when the
+    clusters don't show this "extreme ends" shape — e.g. a wrapped table
+    cell's lines, which stay column-aligned rather than spreading to
+    opposite ends, are correctly left as a single box.
+    """
+    clusters = _row_clusters(matched_words)
+    if len(clusters) < 2:
+        return None
+    boxes = [b for b in (union_bbox(c) for c in clusters) if b is not None]
+    if len(boxes) < 2:
+        return None
+    combined_w = sum(b.w for b in boxes)
+    union_x1 = min(b.x for b in boxes)
+    union_x2 = max(b.x + b.w for b in boxes)
+    union_w = union_x2 - union_x1
+    if combined_w <= 0 or union_w <= combined_w * _LINE_WRAP_WASTE_RATIO:
+        return None
+    return clusters
 
 
 _BRAND_ZONE_ENTITY_TYPES = {
@@ -707,15 +848,39 @@ class RedactPipeline:
                 f"Document exceeds max pages ({self.settings.max_pages_per_document})",
             )
 
+        # Classify each page (digital vs. scanned) from its native
+        # fitz.Page — before canonicalizing/deskewing — so a digital page
+        # can skip deskewing entirely: a real vector-text PDF page is never
+        # skewed in practice, and skipping it avoids having to re-project
+        # native word boxes through a rotation matrix. classify_and_extract
+        # never raises (it fails safe to "scanned" internally), and
+        # rendered.fitz_page is already None for non-PDF input and the
+        # pdf2image fallback path, both of which are always "scanned".
+        page_kinds: list[str] = []
+        native_results: list[tuple[str, list[EnsembleWord]]] = []
+        for idx, rendered in enumerate(pages):
+            if self.settings.native_text_bypass_enabled:
+                kind, native_merged, native_words = classify_and_extract(
+                    rendered.fitz_page,
+                    opts.dpi,
+                    idx,
+                    self.settings.native_text_min_words,
+                    self.settings.native_text_min_coverage_pct,
+                )
+            else:
+                kind, native_merged, native_words = "scanned", "", []
+            page_kinds.append(kind)
+            native_results.append((native_merged, native_words))
+
         canonical_pages: list[CanonicalPage] = []
         try:
-            for idx, page in enumerate(pages):
+            for idx, rendered in enumerate(pages):
                 canonical_pages.append(
                     canonicalize_page(
-                        page,
+                        rendered.image,
                         idx,
                         strip_gridlines=self.settings.strip_gridlines_enabled,
-                        deskew=self.settings.deskew_enabled,
+                        deskew=self.settings.deskew_enabled and page_kinds[idx] != "digital",
                     )
                 )
         except Exception as exc:
@@ -725,7 +890,9 @@ class RedactPipeline:
         locale, langs, tess_lang = resolve_languages(opts.locale, opts.languages, opts.auto_detect, sample_text)
         page_states: list[PageProcessState] = []
 
-        for canonical in canonical_pages:
+        for idx, canonical in enumerate(canonical_pages):
+            page_kind = page_kinds[idx]
+            native_merged, native_words = native_results[idx]
             try:
                 # Structure extraction (Docling + img2table below) runs on
                 # original_image, not the line-stripped canonical_image OCR
@@ -757,17 +924,22 @@ class RedactPipeline:
             # table — see ensemble.align_word_boxes's table_regions bias.
             table_regions = [b.bbox for b in blocks if b.block_type in ("table", "cell")]
 
-            try:
-                merged_text, ensemble_words, _ = await ensemble_ocr_page(
-                    canonical.canonical_image,
-                    canonical.page_index,
-                    tess_lang,
-                    langs,
-                    table_regions=table_regions,
-                    engine_filter=opts.ocr_engines,
-                )
-            except Exception as exc:
-                raise PipelineStageError("ensemble_ocr", "OCR ensemble failed", exc) from exc
+            if page_kind == "digital":
+                # Native PDF text already extracted above (classify_and_extract) —
+                # skip OCR entirely for this page.
+                merged_text, ensemble_words = native_merged, native_words
+            else:
+                try:
+                    merged_text, ensemble_words, _ = await ensemble_ocr_page(
+                        canonical.canonical_image,
+                        canonical.page_index,
+                        tess_lang,
+                        langs,
+                        table_regions=table_regions,
+                        engine_filter=opts.ocr_engines,
+                    )
+                except Exception as exc:
+                    raise PipelineStageError("ensemble_ocr", "OCR ensemble failed", exc) from exc
 
             sample_text += merged_text + "\n"
             if opts.auto_detect and canonical.page_index == 0 and not opts.locale:
@@ -785,10 +957,19 @@ class RedactPipeline:
                     ensemble_words=ensemble_words,
                     blocks=blocks,
                     word_context=word_context,
+                    page_kind=page_kind,
                 )
             )
 
         return page_states
+
+    def _spillover_stopwords(self) -> frozenset[str]:
+        """Parsed, upper-cased ``Settings.spillover_non_name_stopwords``."""
+        return frozenset(
+            word.strip().upper()
+            for word in self.settings.spillover_non_name_stopwords.split(",")
+            if word.strip()
+        )
 
     def _upsert_custom_overrides(self, opts: RedactOptions) -> None:
         for term in opts.custom_redactions:
@@ -883,6 +1064,64 @@ class RedactPipeline:
                             _SpanCandidate(start, end, "KNOWN_TERM", 0.95, None, None, None)
                         )
 
+                if self.settings.fuzzy_dictionary_scan_enabled:
+                    # A single OCR-garbled character (misread letter, a
+                    # garbled/replacement glyph) breaks the exact scan above
+                    # entirely. Probed for every entry — not only ones with
+                    # zero exact hits — because the same entry can appear on
+                    # a page both cleanly (several exact-matched table rows)
+                    # and once garbled (e.g. a signature block).
+                    # find_fuzzy_term_spans itself already looks for several
+                    # distinct approximate occurrences per entry, but a
+                    # clean occurrence would still win every one of those
+                    # slots (it scores highest) before a different,
+                    # still-uncaught garbled one ever got a turn — masking
+                    # out every already-claimed range first (see
+                    # _mask_claimed_ranges) removes the clean occurrences
+                    # from contention entirely, so the whole per-entry probe
+                    # budget goes to text nothing has matched yet.
+                    masked_text = _mask_claimed_ranges(merged_text, claimed_char_ranges)
+                    fuzzy_candidates: list[tuple[float, int, int]] = []
+                    for entry in self.mock_store.list():
+                        for start, end in find_fuzzy_term_spans(
+                            masked_text,
+                            entry.source_text,
+                            threshold=self.settings.fuzzy_dictionary_scan_threshold,
+                        ):
+                            # Score from the actual matched text's
+                            # similarity, not a fixed constant, so a
+                            # marginal fuzzy hit scores lower confidence
+                            # than a clean exact one downstream.
+                            fuzzy_score = token_sort_ratio(
+                                normalize_source(entry.source_text),
+                                normalize_source(merged_text[start:end]),
+                            )
+                            fuzzy_candidates.append((fuzzy_score, start, end))
+                else:
+                    fuzzy_candidates = []
+
+                # Best-scoring fuzzy match wins a contested range, not the
+                # longest dictionary entry: a longer entry compared against
+                # a short garbled OCR fragment can still clear the threshold
+                # by aligning against a window padded with unrelated
+                # surrounding characters (fuzz.partial_ratio_alignment picks
+                # whatever substring scores best, not necessarily a
+                # semantically real one) — letting length decide first (as
+                # the exact pass above safely does) would let that
+                # coincidental, lower-confidence match shadow a shorter,
+                # far more accurate one for the same span.
+                for fuzzy_score, start, end in sorted(
+                    fuzzy_candidates, key=lambda c: c[0], reverse=True
+                ):
+                    if _char_ranges_overlap(start, end, claimed_char_ranges):
+                        continue
+                    claimed_char_ranges.append((start, end))
+                    spans.append(
+                        _SpanCandidate(
+                            start, end, "KNOWN_TERM_FUZZY", fuzzy_score, None, None, None
+                        )
+                    )
+
             for start, end, entity_type, score, term, _field_role, _account_number, cand_words in spans:
                 if cand_words:
                     # Field-anchored candidate: geometry/text come straight from
@@ -906,7 +1145,10 @@ class RedactPipeline:
                     # match is ambiguous — probe geometrically-adjacent word
                     # windows and let the one that best matches a known
                     # entry win, biased toward the longer window (see
-                    # _resolve_maximal_munch_window).
+                    # _resolve_maximal_munch_window). find_prefix_collisions
+                    # itself excludes a deliberate base+suffix family member
+                    # (e.g. "DPLK AXA MANDIRI" vs. "... - PPIP PU") from
+                    # this signal, so this probe is never triggered for one.
                     normalized_candidate = normalize_source(source_text)
                     if normalized_candidate and self.mock_store.find_prefix_collisions(
                         normalized_candidate
@@ -919,29 +1161,69 @@ class RedactPipeline:
                         )
                         bbox = union_bbox(matched_words)
 
-                original_bbox = canonical_to_original(bbox, canonical.transform)
                 word_bboxes = [w.bbox for w in matched_words] if matched_words else None
                 cell_bbox = _enclosing_cell_bbox(bbox, state.blocks, word_bboxes=word_bboxes)
-                left_neighbor_x = right_neighbor_x = None
-                original_cell_bbox = None
-                if cell_bbox is not None:
-                    original_cell_bbox = canonical_to_original(cell_bbox, canonical.transform)
-                else:
-                    excluded_ids = {id(w) for w in matched_words}
-                    left_x, right_x = _row_neighbor_clamp_x(bbox, ensemble_words, excluded_ids)
-                    dx = canonical.transform.dx
-                    left_neighbor_x = left_x + dx if left_x is not None else None
-                    right_neighbor_x = right_x + dx if right_x is not None else None
-                padded = apply_padding(
-                    original_bbox,
-                    canonical.transform.blur_tier,
-                    canonical.original_image.width,
-                    canonical.original_image.height,
-                    cell_bbox=original_cell_bbox,
-                    left_neighbor_x=left_neighbor_x,
-                    right_neighbor_x=right_neighbor_x,
+
+                # A non-tabular match whose own words wrap across a real
+                # PDF line break (some words at the tail of one line, the
+                # rest at the head of the next) is painted as one tight
+                # box per line instead of a single union box spanning
+                # nearly the full width of both lines — see
+                # _line_wrap_clusters. Table-cell matches are excluded
+                # (cell_bbox is not None): a wrapped cell's lines stay
+                # column-aligned and are already handled as one patch.
+                line_clusters = (
+                    _line_wrap_clusters(matched_words)
+                    if cell_bbox is None and matched_words
+                    else None
                 )
-                if _padded_overlaps_existing(padded, page_redactions):
+                if line_clusters is not None:
+                    candidate_boxes = [
+                        (cluster_bbox, cluster)
+                        for cluster in line_clusters
+                        if (cluster_bbox := union_bbox(cluster)) is not None
+                    ]
+                else:
+                    candidate_boxes = [(bbox, matched_words)]
+
+                painted: list[tuple[BBox, BBox, BBox, list[EnsembleWord]]] = []
+                for sub_bbox, sub_words in candidate_boxes:
+                    sub_original_bbox = canonical_to_original(sub_bbox, canonical.transform)
+                    sub_word_bboxes = [w.bbox for w in sub_words] if sub_words else None
+                    sub_cell_bbox = cell_bbox or _enclosing_cell_bbox(
+                        sub_bbox, state.blocks, word_bboxes=sub_word_bboxes
+                    )
+                    left_neighbor_x = right_neighbor_x = None
+                    original_cell_bbox = None
+                    if sub_cell_bbox is not None:
+                        original_cell_bbox = canonical_to_original(sub_cell_bbox, canonical.transform)
+                    else:
+                        excluded_ids = {id(w) for w in sub_words}
+                        left_x, right_x = _row_neighbor_clamp_x(sub_bbox, ensemble_words, excluded_ids)
+                        dx = canonical.transform.dx
+                        left_neighbor_x = left_x + dx if left_x is not None else None
+                        right_neighbor_x = right_x + dx if right_x is not None else None
+                    # A match whose own words already span more than one
+                    # visual line (e.g. a wrapped table-cell value) has its
+                    # full, correct vertical extent in sub_bbox already —
+                    # adding the usual top/bottom padding on top of that
+                    # risks bleeding into a tightly-packed neighboring row.
+                    sub_multiline = len(_row_clusters(sub_words)) > 1 if sub_words else False
+                    sub_padded = apply_padding(
+                        sub_original_bbox,
+                        canonical.transform.blur_tier,
+                        canonical.original_image.width,
+                        canonical.original_image.height,
+                        cell_bbox=original_cell_bbox,
+                        left_neighbor_x=left_neighbor_x,
+                        right_neighbor_x=right_neighbor_x,
+                        multiline=sub_multiline,
+                    )
+                    if _padded_overlaps_existing(sub_padded, page_redactions):
+                        continue
+                    painted.append((sub_bbox, sub_original_bbox, sub_padded, sub_words))
+
+                if not painted:
                     continue
 
                 if not source_text.strip():
@@ -989,25 +1271,38 @@ class RedactPipeline:
                         ctx = word_context.get(first_idx)
 
                 confidence, breakdown = score_redaction(score, matched_words, ctx)
-                region_counter += 1
-                page_redactions.append(
-                    RedactionRegion(
-                        region_id=f"r-{region_counter:04d}",
-                        page=canonical.page_index,
-                        entity_type=entity_type,
-                        canonical_bbox=bbox,
-                        original_bbox=original_bbox,
-                        padded_bbox=padded,
-                        redaction_confidence=confidence,
-                        confidence_breakdown=breakdown,
-                        structural_context=ctx,
-                        blur_tier=canonical.transform.blur_tier,
-                        engines_seen=sorted({e for w in matched_words for e in w.engines}),
-                        mock_value=entry.mock_value,
-                        mapping_id=entry.mapping_id,
-                        assignment_source=entry.assignment_source,
-                    )
+                engines_seen = sorted({e for w in matched_words for e in w.engines})
+                # When the match was split across a line wrap, only the
+                # cluster carrying the most of the actual matched text
+                # gets the mock value drawn on it — the other line(s) are
+                # painted as blank white patches (mock_value=""), per
+                # _line_wrap_clusters: splitting the mock text itself
+                # across two disjoint boxes has no sensible single font
+                # fit and would read as two separate values.
+                primary_idx = max(
+                    range(len(painted)),
+                    key=lambda i: sum(len(w.text) for w in painted[i][3]),
                 )
+                for idx, (sub_bbox, sub_original_bbox, sub_padded, _sub_words) in enumerate(painted):
+                    region_counter += 1
+                    page_redactions.append(
+                        RedactionRegion(
+                            region_id=f"r-{region_counter:04d}",
+                            page=canonical.page_index,
+                            entity_type=entity_type,
+                            canonical_bbox=sub_bbox,
+                            original_bbox=sub_original_bbox,
+                            padded_bbox=sub_padded,
+                            redaction_confidence=confidence,
+                            confidence_breakdown=breakdown,
+                            structural_context=ctx,
+                            blur_tier=canonical.transform.blur_tier,
+                            engines_seen=engines_seen,
+                            mock_value=entry.mock_value if idx == primary_idx else "",
+                            mapping_id=entry.mapping_id,
+                            assignment_source=entry.assignment_source,
+                        )
+                    )
                 ledger_rows.append(
                     {
                         "mapping_id": entry.mapping_id,
@@ -1021,7 +1316,13 @@ class RedactPipeline:
                 )
 
             if self.settings.spillover_safety_net_enabled and page_redactions:
-                _apply_spillover_safety_net(page_redactions, ensemble_words, state.blocks, canonical)
+                _apply_spillover_safety_net(
+                    page_redactions,
+                    ensemble_words,
+                    state.blocks,
+                    canonical,
+                    self._spillover_stopwords(),
+                )
 
             original = canonical.original_image
             zones = detect_brand_zones(
@@ -1071,6 +1372,7 @@ class RedactPipeline:
                     ensemble_word_count=len(ensemble_words),
                     docling_block_count=len(state.blocks),
                     redaction_count=len(page_redactions),
+                    page_kind=state.page_kind,
                 )
             )
 

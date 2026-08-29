@@ -187,6 +187,30 @@ def test_reading_order_top_to_bottom_left_to_right():
     assert [word.text for word in aligned] == ["C", "A", "B"]
 
 
+def test_reading_order_tolerates_same_row_y_jitter():
+    """A flat (y, x) sort would let a slightly-higher word from a column
+    further right jump ahead of a same-row word further left — corrupting
+    merged_text's left-to-right order and silently breaking any exact
+    substring match (dictionary scan/custom terms) spanning that row. Row-
+    banding by vertical-center adjacency must keep them in visual reading
+    order regardless of a few px of y noise between columns.
+    """
+    aligned = align_word_boxes(
+        [
+            (
+                "tesseract",
+                [
+                    _word("Left", x=10, y=12, h=10),
+                    _word("Right", x=200, y=8, h=10),  # same row, box starts 4px higher
+                    _word("NextRow", x=10, y=80, h=10),
+                ],
+            )
+        ],
+        iou_threshold=0.5,
+    )
+    assert [word.text for word in aligned] == ["Left", "Right", "NextRow"]
+
+
 def test_char_spans_cover_merged_text():
     aligned = align_word_boxes(
         [
