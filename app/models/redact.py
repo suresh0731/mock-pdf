@@ -77,7 +77,7 @@ class RedactionRegion(BaseModel):
     assignment_source: Literal["auto", "user", "brand"] = "auto"
 
 
-PageKind = Literal["digital", "scanned"]
+PageKind = Literal["digital", "scanned", "blank"]
 
 
 class PageAuditSummary(BaseModel):
@@ -89,7 +89,10 @@ class PageAuditSummary(BaseModel):
     docling_block_count: int
     redaction_count: int
     # "digital": native PDF text layer used, OCR skipped for this page.
-    # "scanned": ensemble OCR ran. See app/services/ocr/native_text.py.
+    # "scanned": ensemble OCR ran and found text. "blank": OCR found
+    # nothing and no native text layer either (Settings.
+    # ocr_blank_page_skip_enabled) — 0 redactions possible on this page.
+    # See app/services/ocr/native_text.py and app/pipeline/redact.py.
     page_kind: PageKind = "scanned"
 
 

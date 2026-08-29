@@ -224,6 +224,19 @@ class Settings(BaseSettings):
     # coverage) still falls through to real OCR instead of being trusted.
     native_text_min_coverage_pct: float = 0.02
 
+    # When every OCR engine finds zero words on a page *and* no native PDF
+    # text layer is available either (see native_text_bypass_enabled), the
+    # page is either genuinely blank (a disclaimer/back page) or a scan
+    # too degraded for any engine to read. There's no way to tell those
+    # two apart from "zero words" alone. Default True treats it as blank
+    # and continues with 0 redactions on that page (logged loudly) so one
+    # blank page doesn't block an entire multi-page document forever.
+    # Set False to fail the whole document instead (stage=ensemble_ocr) —
+    # the stricter choice if this document type is expected to always
+    # carry PII on every page, so a page OCR silently couldn't read must
+    # never ship un-redacted.
+    ocr_blank_page_skip_enabled: bool = True
+
     # --- Folder-watch ingestion (extension, alongside UI/API upload) -------
     # Polls `watch_input_dir` for new files and redacts them one at a time
     # (never in parallel — see app/services/watch/folder_watcher.py), using

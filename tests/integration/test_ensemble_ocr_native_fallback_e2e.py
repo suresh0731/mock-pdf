@@ -54,7 +54,7 @@ async def _failing_ocr(*args, **kwargs):
     raise RuntimeError("All configured OCR engines failed or unavailable")
 
 
-def _pipeline(tmp_path: Path, monkeypatch) -> tuple[RedactPipeline, MockDictionaryStore]:
+def _pipeline(tmp_path: Path, monkeypatch, **settings_overrides) -> tuple[RedactPipeline, MockDictionaryStore]:
     monkeypatch.setenv("SHARD_BASE_PATH", str(tmp_path))
     monkeypatch.setenv("MOCK_DICTIONARY_PATH", str(tmp_path / "mappings.json"))
     settings = Settings(
@@ -65,6 +65,7 @@ def _pipeline(tmp_path: Path, monkeypatch) -> tuple[RedactPipeline, MockDictiona
         # Default thresholds (20 words / 2% coverage): this page's 2 words
         # must fail classification and be routed to OCR first.
         _env_file=None,
+        **settings_overrides,
     )
     mock_store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
     mock_store.resolve(PERSON)
@@ -98,10 +99,12 @@ def test_ocr_failure_falls_back_to_native_text_when_available(tmp_path, monkeypa
     assert person_region.mock_value == store.resolve(PERSON).mock_value
 
 
-def test_ocr_failure_still_raises_when_no_native_text_available(tmp_path, monkeypatch):
-    """A genuinely scanned, image-only page (no fitz_page/text layer at
-    all) must still surface the OCR failure -- there's nothing to fall
-    back to."""
+def test_ocr_failure_skips_blank_page_by_default(tmp_path, monkeypatch):
+    """A page with no OCR text AND no native text layer at all (no
+    fitz_page) -- either genuinely blank or an unreadably degraded scan --
+    must not abort the whole document by default
+    (Settings.ocr_blank_page_skip_enabled=True): it's treated as blank
+    (0 redactions possible on it) and the run still completes."""
     pages = [RenderedPage(image=_blank_image(), fitz_page=None)]
     monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: pages)
     ocr_mock = AsyncMock(side_effect=_failing_ocr)
@@ -109,6 +112,27 @@ def test_ocr_failure_still_raises_when_no_native_text_available(tmp_path, monkey
     monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
 
     pipeline, _store = _pipeline(tmp_path, monkeypatch)
+
+    _, audit, _ = asyncio.run(pipeline.run(b"%PDF-1.4", "doc.pdf", RedactOptions()))
+
+    assert [p.page_kind for p in audit.pages] == ["blank"]
+    # A footer/brand-zone patch (position-based, no text needed) may still
+    # land on a blank page -- only actual PII redactions are impossible.
+    assert not any(r.page == 0 for r in audit.redactions if r.assignment_source != "brand")
+
+
+def test_ocr_failure_still_raises_when_blank_page_skip_disabled(tmp_path, monkeypatch):
+    """With Settings.ocr_blank_page_skip_enabled=False, a page with no OCR
+    text and no native text layer must still surface the OCR failure --
+    the stricter choice for a document type expected to always carry PII
+    on every page."""
+    pages = [RenderedPage(image=_blank_image(), fitz_page=None)]
+    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: pages)
+    ocr_mock = AsyncMock(side_effect=_failing_ocr)
+    monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", ocr_mock)
+    monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
+
+    pipeline, _store = _pipeline(tmp_path, monkeypatch, ocr_blank_page_skip_enabled=False)
 
     from app.pipeline.errors import PipelineStageError
 

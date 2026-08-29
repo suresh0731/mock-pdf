@@ -13,9 +13,12 @@ class PageProcessState:
     ensemble_words: list[EnsembleWord] = field(default_factory=list)
     blocks: list[DocBlock] = field(default_factory=list)
     word_context: dict = field(default_factory=dict)
-    # "digital" (native PDF text layer, OCR skipped) or "scanned" (ensemble
-    # OCR ran) — see app/services/ocr/native_text.py. Surfaced on
-    # PageAuditSummary for operator visibility on mixed documents.
+    # "digital" (native PDF text layer, OCR skipped), "scanned" (ensemble
+    # OCR ran and found text), or "blank" (OCR found nothing and no
+    # native text layer either — Settings.ocr_blank_page_skip_enabled;
+    # see app/pipeline/redact.py._build_page_states). See
+    # app/services/ocr/native_text.py for "digital" vs "scanned".
+    # Surfaced on PageAuditSummary for operator visibility.
     page_kind: str = "scanned"
 
     @property

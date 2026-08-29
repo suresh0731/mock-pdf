@@ -954,7 +954,38 @@ class RedactPipeline:
                         fallback_merged, fallback_words = extract_native_words(
                             pages[idx].fitz_page, opts.dpi, idx
                         )
-                    if not fallback_words:
+                    if fallback_words:
+                        logger.warning(
+                            "ensemble_ocr failed for page_index=%s (%s); falling back to "
+                            "native PDF text layer",
+                            idx,
+                            type(exc).__name__,
+                        )
+                        merged_text, ensemble_words = fallback_merged, fallback_words
+                        page_kind = "digital"
+                    elif self.settings.ocr_blank_page_skip_enabled:
+                        # No OCR text AND no native text layer at all —
+                        # either a genuinely blank page (disclaimer/back
+                        # page) or a scan too degraded for every engine to
+                        # read; "zero words" alone can't distinguish those.
+                        # Skipping keeps one such page from blocking the
+                        # rest of a multi-page document — logged loudly
+                        # (not silent) since 0 redactions is possible on
+                        # this page either way. Disable via
+                        # Settings.ocr_blank_page_skip_enabled if this
+                        # document type must never ship a page OCR
+                        # couldn't read.
+                        logger.warning(
+                            "page_index=%s: no OCR text and no native text layer (%s) — "
+                            "treating as blank/unreadable, 0 redactions possible on this "
+                            "page; set ocr_blank_page_skip_enabled=False to fail the whole "
+                            "document instead",
+                            idx,
+                            type(exc).__name__,
+                        )
+                        merged_text, ensemble_words = "", []
+                        page_kind = "blank"
+                    else:
                         raise PipelineStageError(
                             "ensemble_ocr",
                             f"OCR ensemble failed on page_index={idx} ({type(exc).__name__}); "
@@ -962,14 +993,6 @@ class RedactPipeline:
                             "per-engine breakdown",
                             exc,
                         ) from exc
-                    logger.warning(
-                        "ensemble_ocr failed for page_index=%s (%s); falling back to "
-                        "native PDF text layer",
-                        idx,
-                        type(exc).__name__,
-                    )
-                    merged_text, ensemble_words = fallback_merged, fallback_words
-                    page_kind = "digital"
 
             sample_text += merged_text + "\n"
             if opts.auto_detect and canonical.page_index == 0 and not opts.locale:
