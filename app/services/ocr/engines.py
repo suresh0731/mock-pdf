@@ -156,6 +156,15 @@ def _rapidocr_lang_params(langs: list[str] | None) -> tuple[str, str]:
     model does not read Indonesian/Malay text at all — see
     ``app/services/locale/resolver.py``'s ``LOCALE_LANG_MAP``.
 
+    ``Det.lang_type`` must be one of RapidOCR's own supported per-language
+    values (its model resolver validates against that exact set) — passing
+    the literal string ``"multi"`` (a previous version of this function's
+    attempt at "any non-English/non-Chinese language") is not itself a
+    valid ``lang_type`` and always raises ``ValueError`` at engine
+    construction, regardless of image content. Every language in
+    ``_RAPIDOCR_REC_LANG`` is valid for *both* Det and Rec under the same
+    name, so the same resolved language is used for both.
+
     Args:
         langs: Resolved language codes for this document (e.g. ``["en",
             "id"]``), or ``None``.
@@ -168,8 +177,7 @@ def _rapidocr_lang_params(langs: list[str] | None) -> tuple[str, str]:
     for lang in langs or []:
         rec = _RAPIDOCR_REC_LANG.get(lang)
         if rec is not None:
-            det = "ch" if rec in ("ch", "chinese_cht") else "multi"
-            return det, rec
+            return rec, rec
     return "en", "en"
 
 

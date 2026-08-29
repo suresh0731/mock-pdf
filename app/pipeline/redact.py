@@ -28,7 +28,7 @@ from app.pipeline.page_state import PageProcessState
 from app.services.locale.resolver import resolve_languages
 from app.services.ocr.ensemble import ensemble_ocr_page
 from app.services.ocr.ensemble_types import EnsembleWord
-from app.services.ocr.native_text import classify_and_extract
+from app.services.ocr.native_text import classify_and_extract, extract_native_words
 from app.services.ocr.page_renderer import load_pages
 from app.services.pii.brand_zones import (
     BrandZone,
@@ -939,7 +939,31 @@ class RedactPipeline:
                         engine_filter=opts.ocr_engines,
                     )
                 except Exception as exc:
-                    raise PipelineStageError("ensemble_ocr", "OCR ensemble failed", exc) from exc
+                    # Every configured OCR engine failed/returned nothing for
+                    # this page (e.g. a low-contrast scan, or a "hybrid"
+                    # PDF whose embedded text layer didn't clear the
+                    # digital-page thresholds above). Rather than aborting
+                    # the whole document, fall back to whatever native PDF
+                    # text this page actually has — a page with *some*
+                    # copyable text is strictly better redacted from that
+                    # text than not redacted at all. Only a page with no
+                    # text layer at all (fitz_page is None, or truly
+                    # scanned-image-only) still raises.
+                    fallback_merged, fallback_words = "", []
+                    if self.settings.native_text_bypass_enabled and pages[idx].fitz_page is not None:
+                        fallback_merged, fallback_words = extract_native_words(
+                            pages[idx].fitz_page, opts.dpi, idx
+                        )
+                    if not fallback_words:
+                        raise PipelineStageError("ensemble_ocr", "OCR ensemble failed", exc) from exc
+                    logger.warning(
+                        "ensemble_ocr failed for page_index=%s (%s); falling back to "
+                        "native PDF text layer",
+                        idx,
+                        type(exc).__name__,
+                    )
+                    merged_text, ensemble_words = fallback_merged, fallback_words
+                    page_kind = "digital"
 
             sample_text += merged_text + "\n"
             if opts.auto_detect and canonical.page_index == 0 and not opts.locale:

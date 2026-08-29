@@ -19,17 +19,23 @@ def test_rapidocr_lang_params_defaults_to_english_for_english_only():
 def test_rapidocr_lang_params_prefers_indonesian_over_english():
     """Indonesian locale (LOCALE_LANG_MAP["id"] == ["en", "id"]) must select
     the id recognition model, not silently fall back to RapidOCR's
-    English/Chinese default."""
-    assert _rapidocr_lang_params(["en", "id"]) == ("multi", "id")
+    English/Chinese default. Det and Rec must use the *same* lang_type:
+    RapidOCR's model resolver validates ``Det.lang_type`` against its own
+    per-language set, and the literal string ``"multi"`` (used here by a
+    prior, buggy version of this function) is not a member of that set —
+    passing it raises ``ValueError`` at engine construction for every
+    Indonesian/Malay/Traditional-Chinese document, regardless of image
+    content (see ``ocr_image_rapidocr``'s docstring)."""
+    assert _rapidocr_lang_params(["en", "id"]) == ("id", "id")
 
 
 def test_rapidocr_lang_params_prefers_malay_over_english():
-    assert _rapidocr_lang_params(["en", "ms"]) == ("multi", "ms")
+    assert _rapidocr_lang_params(["en", "ms"]) == ("ms", "ms")
 
 
 def test_rapidocr_lang_params_maps_chinese_variants():
     assert _rapidocr_lang_params(["en", "ch_sim"]) == ("ch", "ch")
-    assert _rapidocr_lang_params(["en", "ch_tra"]) == ("ch", "chinese_cht")
+    assert _rapidocr_lang_params(["en", "ch_tra"]) == ("chinese_cht", "chinese_cht")
 
 
 def test_rapidocr_lang_params_unknown_language_falls_back_to_english():
@@ -50,12 +56,12 @@ def test_get_rapidocr_engine_caches_per_language_pair(monkeypatch):
 
     engine_en = _get_rapidocr_engine("en", "en")
     engine_en_again = _get_rapidocr_engine("en", "en")
-    engine_id = _get_rapidocr_engine("multi", "id")
+    engine_id = _get_rapidocr_engine("id", "id")
 
     assert engine_en is engine_en_again
     assert engine_en is not engine_id
     assert len(created) == 2
     assert created[0] == {"Det.lang_type": "en", "Rec.lang_type": "en"}
-    assert created[1] == {"Det.lang_type": "multi", "Rec.lang_type": "id"}
+    assert created[1] == {"Det.lang_type": "id", "Rec.lang_type": "id"}
 
     _rapidocr_engines.clear()
