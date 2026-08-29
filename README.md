@@ -88,6 +88,47 @@ Setting `WATCH_ENABLED=true` and starting the app normally
 
 To add a new curated mapping permanently, edit `mappings.seed.json` directly (or via `POST /v1/mappings/upload` CSV import → then copy the resulting rows into the seed file) rather than relying on an auto-learned local entry.
 
+## Debugging: visualizing pipeline stages
+
+To find exactly where a redaction goes wrong (a table header swallowed by a redaction box, a wrong mock value, PII that never got detected, an over/under-padded box, ...), `scripts/visualize_pipeline_stages.py` re-derives every intermediate artifact `RedactPipeline` produces for **one page** and writes each stage as its own numbered, annotated PNG instead of only the final redacted output. It calls the exact same functions `RedactPipeline` calls internally (`extract_field_candidates`, `_collect_redactions`, ...) — it never changes production behavior, only observes it.
+
+| # | Stage (`pipeline_stages/N.png`) | What to look for |
+|---|------|-------------------|
+| 1 | Raw rendered input page | Sanity-check the render itself (size, dpi) |
+| 2 | Preprocessed/canonical image | `page_kind` (`digital` vs `scanned`), blur tier, skew — what OCR actually reads |
+| 3 | Structure blocks (Docling + img2table) | `0 structure blocks` = degraded table/cell detection downstream |
+| 4 | OCR ensemble word boxes | Garbled/missing words; `single-engine only` words are lower-confidence gap candidates |
+| 5 | Raw PII candidates (pre mock-resolution) | Every span *before* it's assigned a mock value, colored by detection source (field-anchored / dictionary-scan / dictionary-scan fuzzy / custom-term) |
+| 6 | Accepted redactions (tight box) | What survived mock resolution + dedup, and which mock value it was assigned |
+| 7 | Padding | Tight vs. painted box — a padded box that swallows a neighboring cell/word is visible here |
+| 8 | Brand zones | `FOOTER`/`IMAGE` zones (logos, stamps, signatures) painted on top of the PII redactions |
+| 9 | Final output | The **actual** production render path — real vector-native redaction for `digital` pages, paint-then-flatten raster for `scanned` pages |
+
+### Digital PDFs (text-layer PDFs, invoices exported from software, etc.)
+
+Run directly — the script takes a PDF path and a 1-indexed `--page`:
+```powershell
+python scripts\visualize_pipeline_stages.py path\to\document.pdf --page 1
+```
+Images land in `pipeline_stages/` by default (override with `--out-dir`).
+
+### Scanned inputs (photographed/scanned JPG, PNG, TIFF)
+
+The script always opens its input as a PDF (page selection goes through PyMuPDF's `doc.select`), so a raw image needs to be wrapped in a throwaway single-page PDF first. This doesn't change anything the pipeline sees: `app/services/ocr/page_renderer.py`'s `load_pages` treats a rendered PDF-page pixmap and a directly-loaded image identically, and the wrapped page still classifies as `page_kind=scanned` end-to-end (there's no text layer either way).
+```powershell
+python -c "from PIL import Image; Image.open('test-input\1000099358.jpg').convert('RGB').save('test-input\1000099358.pdf')"
+python scripts\visualize_pipeline_stages.py test-input\1000099358.pdf --page 1
+```
+Delete the intermediate `.pdf` afterward — it's only a page-selection shim, not an input the pipeline needs kept around.
+
+### Isolating dictionary problems from pipeline-logic problems
+
+- `--mapping-csv path\to\mappings.csv` — import an additional `source_text,mock_value` CSV on top of the base dictionary before rendering, so a doc-specific test mapping (e.g. a client-supplied `mappings.csv`) drives the run.
+- `--empty-dictionary` — start from an **empty** mock dictionary instead of seeding from the real, machine-local `data/mock-dictionary/mappings.json`. Combine with `--mapping-csv` to see redactions driven *only* by a known-good CSV, with zero interference from stale/auto-learned local entries.
+- `--use-real-dictionary` (default) — seed from the real `mappings.json` (a read-only copy is used; the real file is never written to).
+
+`mappings.json` only ever grows and is never overwritten by a re-import (see "Mock dictionary" above and `app/services/pii/mapping_csv.py`'s docstring), so a `--use-real-dictionary` run and an `--empty-dictionary --mapping-csv your.csv` run of the *same page* can legitimately disagree: if a stale or wrong entry for the same `source_text` already exists locally (e.g. from an earlier auto-learned/uncorrected run), the real-dictionary run keeps it, while the clean run shows what *should* happen per the CSV. When the two runs disagree, the root cause is almost always a stale local dictionary entry, not a bug in `extract_field_candidates`/`_collect_redactions` — check stage 6's mock value against the CSV first before digging into detection logic.
+
 ## Table structure detection: Docling + img2table
 
 Table/cell geometry (used to stitch multi-line-wrapped cells and to score structural confidence) comes from two complementary sources, merged in `app/services/structure/table_geometry.py`:
