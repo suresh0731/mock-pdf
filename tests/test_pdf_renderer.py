@@ -7,10 +7,23 @@ import fitz
 from PIL import Image
 
 from app.services.redact.pdf_renderer import (
+    PageRenderInput,
     _regions_in_draw_order,
     _sanitize_filename,
     render_redacted_pdf,
 )
+
+_DPI = 200
+_SCALE = _DPI / 72.0
+
+
+def _pixel_rect(rect: fitz.Rect) -> tuple[int, int, int, int]:
+    return (
+        int(rect.x0 * _SCALE),
+        int(rect.y0 * _SCALE),
+        int((rect.x1 - rect.x0) * _SCALE),
+        int((rect.y1 - rect.y0) * _SCALE),
+    )
 
 
 def _page(w: int = 120, h: int = 80, color: str = "white") -> Image.Image:
@@ -236,3 +249,98 @@ def test_jpeg_quality_affects_output_size():
     low_quality = render_redacted_pdf([page], [region], "doc.pdf", jpeg_quality=10)
     high_quality = render_redacted_pdf([page], [region], "doc.pdf", jpeg_quality=95)
     assert len(low_quality) < len(high_quality)
+
+
+def _digital_fitz_page(text: str, width: float = 300.0, height: float = 150.0) -> fitz.Page:
+    src_doc = fitz.open()
+    page = src_doc.new_page(width=width, height=height)
+    page.insert_text((10, 30), text)
+    return page
+
+
+def test_digital_page_kind_stays_vector_with_selectable_text():
+    """A "digital" PageRenderInput must come out as a real vector page:
+    non-redacted text stays selectable, the redacted span is gone, and
+    the mock value is drawn back in as real text — not a rasterized
+    JPEG page like the scanned path produces."""
+    fitz_page = _digital_fitz_page("Account Name: John Doe")
+    rect = fitz_page.search_for("John Doe")[0]
+    px, py, pw, ph = _pixel_rect(rect)
+    region = _region(page=0, x=px, y=py, w=pw, h=ph, mock_value="PERSON_01")
+
+    page_input = PageRenderInput(image=_page(), page_kind="digital", fitz_page=fitz_page, dpi=_DPI)
+    pdf = render_redacted_pdf([page_input], [region], "doc.pdf")
+
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        assert len(doc) == 1
+        text = doc[0].get_text()
+        assert "Account Name" in text
+        assert "John Doe" not in text
+        assert "PERSON_01" in text
+    finally:
+        doc.close()
+
+
+def test_scanned_page_kind_still_flattens_to_raster():
+    """A "scanned" PageRenderInput (or one with no fitz_page) must keep
+    getting the paint-then-flatten treatment even when passed through
+    the new PageRenderInput shape."""
+    image = _page(200, 100, "white")
+    image.paste((255, 0, 0), [10, 20, 90, 44])
+    region = _region(page=0, x=10, y=20, w=80, h=24)
+
+    page_input = PageRenderInput(image=image, page_kind="scanned", fitz_page=None)
+    pdf = render_redacted_pdf([page_input], [region], "doc.pdf")
+
+    img = _pdf_to_image(pdf)
+    pixel = img.getpixel((12, 22))
+    assert all(channel > 230 for channel in pixel)
+
+
+def test_mixed_digital_and_scanned_pages_assemble_in_correct_order():
+    """Page 0 digital + page 1 scanned must come out as [vector page,
+    image page] in that exact order — the per-page branching this
+    module exists to add."""
+    fitz_page = _digital_fitz_page("Digital Page One")
+    digital_input = PageRenderInput(image=_page(), page_kind="digital", fitz_page=fitz_page, dpi=_DPI)
+    scanned_input = PageRenderInput(image=_page(color="blue"), page_kind="scanned", fitz_page=None)
+
+    pdf = render_redacted_pdf([digital_input, scanned_input], [], "doc.pdf")
+
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        assert len(doc) == 2
+        # Page 0 stayed real vector content: its original text survives
+        # verbatim (nothing was redacted on it) and it carries no raster
+        # image the way a flattened page always would.
+        assert "Digital Page One" in doc[0].get_text()
+        assert len(doc[0].get_images()) == 0
+        # Page 1 is the flattened raster page: no extractable text, one
+        # embedded image.
+        assert doc[1].get_text().strip() == ""
+        assert len(doc[1].get_images()) == 1
+    finally:
+        doc.close()
+
+
+def test_vector_redaction_failure_falls_back_to_raster_for_that_page(caplog):
+    """If a "digital" page's fitz_page can't actually be redacted as
+    vector content (missing .parent/.number — should never happen for a
+    real fitz.Page, but must not crash the whole render if it somehow
+    does), that one page still comes out as a raster page rather than
+    aborting the document."""
+    image = _page(color="green")
+    broken_fitz_page = SimpleNamespace()  # no .parent / .number
+    page_input = PageRenderInput(image=image, page_kind="digital", fitz_page=broken_fitz_page, dpi=_DPI)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.redact.pdf_renderer"):
+        pdf = render_redacted_pdf([page_input], [], "doc.pdf")
+
+    assert "vector_redaction_failed" in caplog.text
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        assert len(doc) == 1
+        assert len(doc[0].get_images()) == 1
+    finally:
+        doc.close()

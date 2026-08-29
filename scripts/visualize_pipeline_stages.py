@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT))
 tmp_dir = Path(tempfile.mkdtemp(prefix="pii_visualize_"))
 os.environ.setdefault("SHARD_BASE_PATH", str(tmp_dir))
 
+import fitz  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -183,8 +184,6 @@ def _extract_single_page(src: Path, page_number: int) -> Path:
     """1-indexed ``page_number`` -> a temp single-page PDF (avoids the OCR
     concurrency path entirely, since only one page ever exists to process).
     """
-    import fitz
-
     doc = fitz.open(src)
     page_index = page_number - 1
     if not (0 <= page_index < doc.page_count):
@@ -311,6 +310,14 @@ async def main() -> None:
         action="store_false",
         help="Start from an empty mock dictionary instead",
     )
+    parser.add_argument(
+        "--mapping-csv",
+        default=None,
+        help="Additional source_text,mock_value CSV to import on top of the "
+        "base dictionary (same shape as the mock-dictionary export/template) "
+        "- lets a doc-specific test mapping drive a visualization run "
+        "without touching the real data/mock-dictionary/mappings.json",
+    )
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -335,6 +342,17 @@ async def main() -> None:
     configure_tesseract()
 
     mock_store = MockDictionaryStore(snapshot_path=mock_snapshot)
+    if args.mapping_csv:
+        from app.services.pii.mapping_csv import import_mappings_csv
+
+        csv_path = Path(args.mapping_csv)
+        if not csv_path.is_absolute():
+            csv_path = REPO_ROOT / csv_path
+        result = import_mappings_csv(mock_store, csv_path.read_text(encoding="utf-8"))
+        print(
+            f"Imported {args.mapping_csv}: {result.inserted} inserted, "
+            f"{result.skipped_existing} skipped (existing), {result.skipped_invalid} skipped (invalid)"
+        )
     ledger_store = LedgerStore(base_dir=tmp_dir / "shards")
     audit_store = AuditStore()
     pipeline = RedactPipeline(
@@ -561,14 +579,44 @@ async def main() -> None:
         out_dir, 8, "brand zones",
     )
 
-    # ---- Stage 9: final rendered output ----------------------------------
-    final_img = _draw_on_image(canonical.original_image, all_redactions)
+    # ---- Stage 9: final rendered output -----------------------------------
+    # Mirrors app/services/redact/pdf_renderer.py's own branch exactly: a
+    # "digital" page with a real fitz_page is redacted as real vector PDF
+    # content (pdf_native_redactor) and never rasterized; everything else
+    # still gets the paint-then-flatten raster treatment. Rendering the
+    # *actual* production path here (not a simulation of it) is what makes
+    # this stage trustworthy for spotting real gaps.
+    if page_kind == "digital" and raw_page.fitz_page is not None:
+        from app.services.redact.pdf_native_redactor import (
+            redact_image_regions,
+            redact_text_regions,
+        )
+
+        clone_doc = fitz.open()
+        clone_doc.insert_pdf(
+            raw_page.fitz_page.parent,
+            from_page=raw_page.fitz_page.number,
+            to_page=raw_page.fitz_page.number,
+        )
+        clone_page = clone_doc[0]
+        redact_text_regions(clone_page, all_redactions, opts.dpi)
+        redact_image_regions(clone_page, all_redactions, opts.dpi)
+        pix = clone_page.get_pixmap(dpi=opts.dpi, colorspace=fitz.csRGB)
+        final_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        clone_doc.close()
+        final_subtitle = (
+            "page_kind=digital: REAL vector-native redaction (pdf_native_redactor) — "
+            f"total redactions={len(all_redactions)} ({len(non_brand)} PII + {len(brand)} brand/footer/image) "
+            "— output PDF page still has selectable text/real vector content, not a flattened image"
+        )
+    else:
+        final_img = _draw_on_image(canonical.original_image, all_redactions)
+        final_subtitle = (
+            f"page_kind={page_kind}: paint-then-flatten raster path — "
+            f"total redactions={len(all_redactions)} ({len(non_brand)} PII + {len(brand)} brand/footer/image)"
+        )
     _save(
-        _with_title(
-            final_img,
-            "9. Final Output — redacted page (white box + mock value painted)",
-            f"total redactions={len(all_redactions)} ({len(non_brand)} PII + {len(brand)} brand/footer/image)",
-        ),
+        _with_title(final_img, "9. Final Output — actual redaction path used in production", final_subtitle),
         out_dir, 9, "final redacted page",
     )
 

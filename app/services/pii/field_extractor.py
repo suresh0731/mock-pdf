@@ -504,6 +504,26 @@ def _label_window_widths(labels: tuple[str, ...], max_width: int) -> list[int]:
     return sorted(w for w in widths if 1 <= w <= max_width)
 
 
+_MIN_TOKEN_ALIGN = 0.55
+
+
+def _all_words_align_to_label(window_words: list[EnsembleWord], label: str) -> bool:
+    """True if every word in ``window_words`` individually resembles at
+    least one word of ``label`` — see the caller in
+    ``_find_all_label_windows_multi`` for why this guard exists.
+    """
+    label_tokens = _normalize_label_candidate(label).split()
+    if not label_tokens:
+        return False
+    for w in window_words:
+        token = _normalize_label_candidate(w.text)
+        if not token:
+            continue
+        if max(token_sort_ratio(token, lt) for lt in label_tokens) < _MIN_TOKEN_ALIGN:
+            return False
+    return True
+
+
 def _find_all_label_windows_multi(
     row: list[EnsembleWord],
     groups: tuple[tuple[tuple[str, ...], str], ...],
@@ -571,7 +591,23 @@ def _find_all_label_windows_multi(
                     continue
                 match = best_fuzzy_match(window_text, list(labels), threshold=threshold)
                 if match is not None:
-                    _, ratio = match
+                    label_idx, ratio = match
+                    if width > 1 and not _all_words_align_to_label(
+                        window_words, labels[label_idx]
+                    ):
+                        # token_sort_ratio compares the whole window against
+                        # the whole label at once, so a window straddling two
+                        # unrelated concepts (e.g. the tail of a wrapped
+                        # address line "...INDIA" immediately followed by an
+                        # unrelated field's own label start "Account") can
+                        # still score high purely off *one* shared word
+                        # ("account") while the other word ("india") has no
+                        # real resemblance to anything in the label ("account
+                        # name") — silently dragging unrelated leading text
+                        # into the match. Require every window word to
+                        # individually resemble some word of the label it
+                        # supposedly matched.
+                        continue
                     if best is None or ratio > best[1]:
                         best = (width, ratio, key)
         if best is not None:

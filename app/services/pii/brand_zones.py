@@ -221,6 +221,15 @@ _PICTURE_OWN_OVERLAP_SKIP = 0.5
 _WORD_INSIDE_PICTURE_COVERAGE = 0.6
 _PICTURE_INSET_FRACTION = 0.15
 _PICTURE_INSET_MIN_PX = 8
+# The "picture inside a cell" skip only makes sense for the small icon
+# case it was built for (a bank-column logo occupying a minor fraction of
+# its cell). Without this ratio check, a real full-size logo (e.g. a
+# letterhead) whose center merely happens to fall inside an unrelated,
+# overly broad table-geometry cell (img2table's own table detection can
+# produce a cell spanning a whole header block) would be silently
+# excluded from redaction even though it isn't a small in-cell icon at
+# all — see the header-table/logo overlap case in a real bank statement.
+_PICTURE_CELL_AREA_RATIO_MAX = 0.5
 
 
 def _bbox_center_xy(bbox: BBox) -> tuple[float, float]:
@@ -232,12 +241,25 @@ def _point_in_bbox(bbox: BBox, x: float, y: float) -> bool:
 
 
 def _picture_center_in_cell(bbox: BBox, blocks: list[DocBlock]) -> bool:
-    """True when the picture sits inside a table cell (bank-column logos)."""
+    """True when the picture sits inside a table cell as a minor
+    fraction of it (bank-column logos) — not merely whenever its center
+    happens to fall inside some cell, which a real, page-spanning logo
+    can do purely by coincidence against an overly broad table-geometry
+    cell (see ``_PICTURE_CELL_AREA_RATIO_MAX``).
+    """
+    picture_area = bbox.w * bbox.h
+    if picture_area <= 0:
+        return False
     cx, cy = _bbox_center_xy(bbox)
     for block in blocks:
         if block.block_type.lower() != "cell":
             continue
-        if _point_in_bbox(block.bbox, cx, cy):
+        if not _point_in_bbox(block.bbox, cx, cy):
+            continue
+        cell_area = block.bbox.w * block.bbox.h
+        if cell_area <= 0:
+            continue
+        if picture_area / cell_area <= _PICTURE_CELL_AREA_RATIO_MAX:
             return True
     return False
 

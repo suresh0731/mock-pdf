@@ -49,7 +49,7 @@ from app.services.pii.name_matcher import token_sort_ratio
 from app.services.pii.redaction_scorer import score_redaction
 from app.services.preprocess.canonical import CanonicalPage, canonicalize_page
 from app.services.redact.audit_store import AuditStore
-from app.services.redact.pdf_renderer import render_redacted_pdf
+from app.services.redact.pdf_renderer import PageRenderInput, render_redacted_pdf
 from app.services.redact.session_store import RedactSession, session_store
 from app.services.structure.docling_adapter import DocBlock, extract_structure
 from app.services.structure.spatial_join import join_words_to_blocks
@@ -1011,6 +1011,9 @@ class RedactPipeline:
                     blocks=blocks,
                     word_context=word_context,
                     page_kind=page_kind,
+                    fitz_page=pages[idx].fitz_page,
+                    dpi=opts.dpi,
+                    _fitz_doc=pages[idx]._doc,
                 )
             )
 
@@ -1438,8 +1441,17 @@ class RedactPipeline:
         filename: str,
     ) -> bytes:
         try:
+            page_inputs = [
+                PageRenderInput(
+                    image=s.canonical.original_image,
+                    page_kind=s.page_kind,
+                    fitz_page=s.fitz_page,
+                    dpi=s.dpi,
+                )
+                for s in page_states
+            ]
             return render_redacted_pdf(
-                [s.canonical.original_image for s in page_states],
+                page_inputs,
                 redactions,
                 filename,
                 image_format=self.settings.redact_output_image_format,
