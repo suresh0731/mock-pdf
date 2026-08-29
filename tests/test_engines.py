@@ -1,10 +1,14 @@
 import sys
 import types
 
+from PIL import Image
+
+import app.services.ocr.engines as engines
 from app.services.ocr.engines import (
     _get_rapidocr_engine,
     _rapidocr_engines,
     _rapidocr_lang_params,
+    ocr_image_rapidocr,
 )
 
 
@@ -65,3 +69,37 @@ def test_get_rapidocr_engine_caches_per_language_pair(monkeypatch):
     assert created[1] == {"Det.lang_type": "id", "Rec.lang_type": "id"}
 
     _rapidocr_engines.clear()
+
+
+class _FakeEmptyRapidResult:
+    """Mirrors RapidOCR's real default-constructed ``RapidOCROutput()`` for
+    a page with zero detected text: ``__len__`` is the documented "is this
+    actually empty" check, but ``word_results`` is a non-empty *sentinel*
+    tuple (``(("", 1.0, None),)``), not ``()``."""
+
+    word_results = (("", 1.0, None),)
+
+    def __len__(self):
+        return 0
+
+
+def test_ocr_image_rapidocr_handles_empty_detection_without_raising(monkeypatch):
+    """Regression test: a page/image with no detected text must come back
+    as an empty-but-successful result, not raise ``ValueError``. Blindly
+    flattening ``word_results``'s empty-result sentinel tuple as if it
+    were one real "line" of word tuples used to unpack the sentinel's
+    first element (``""``, a 0-length string) into ``(word_text, score,
+    box)`` and raise ``ValueError: not enough values to unpack`` — making
+    every page with no text on it look like an engine crash."""
+
+    class FakeEngine:
+        def __call__(self, *args, **kwargs):
+            return _FakeEmptyRapidResult()
+
+    monkeypatch.setattr(engines, "_get_rapidocr_engine", lambda *a, **k: FakeEngine())
+
+    text, conf, words = ocr_image_rapidocr(Image.new("RGB", (10, 10), "white"))
+
+    assert text == ""
+    assert conf == 0.0
+    assert words == []

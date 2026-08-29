@@ -348,10 +348,16 @@ async def _run_one_engine(
     image: Image.Image,
     tess_lang: str,
     langs: list[str],
+    page: int = -1,
 ) -> EnginePageResult | None:
     """Run a single named engine; return None on unavailability/failure.
 
     Never raises — callers decide whether a ``None`` result is fatal.
+
+    Args:
+        page: Page index, logged for context only (``-1`` when unknown —
+            never a hard requirement, so existing callers/tests that don't
+            pass it keep working).
     """
     if name not in _KNOWN_ENGINES:
         logger.warning("Unknown OCR engine %r; skipping", name)
@@ -362,13 +368,21 @@ async def _run_one_engine(
         logger.warning("Unknown OCR engine %r; skipping", name)
         return None
     if not availability():
+        logger.info("OCR engine %s not available for page=%s; skipping", name, page)
         return None
     try:
         text, conf, words = await loop.run_in_executor(
             None, runner, *_engine_call_args(name, image, tess_lang, langs)
         )
     except Exception as exc:  # noqa: BLE001 - engine failures must not abort the page
-        logger.warning("%s", _format_engine_failure(name, exc))
+        logger.warning("page=%s %s", page, _format_engine_failure(name, exc))
+        return None
+    if not words:
+        # Not an error — a page can legitimately have no detectable text
+        # (blank region, low-contrast scan) — but this used to be
+        # completely silent, indistinguishable from "engine never ran",
+        # making the eventual "all engines failed" a black box to debug.
+        logger.info("OCR engine %s found no words on page=%s", name, page)
         return None
     return EnginePageResult(engine=name, text=text, confidence=conf, words=words)
 
@@ -397,20 +411,25 @@ async def _ensemble_ocr_page_single(
     attempted: list[str] = []
     for name in order:
         attempted.append(name)
-        result = await _run_one_engine(loop, name, image, tess_lang, langs)
+        result = await _run_one_engine(loop, name, image, tess_lang, langs, page=page)
         if result is not None and result.words:
             if name != settings.ocr_primary_engine:
                 logger.warning(
-                    "Primary/earlier OCR engines unavailable or empty (%s); "
-                    "fell back to %s",
+                    "page=%s: primary/earlier OCR engines unavailable or empty (%s); "
+                    "fell back to %s (%d words)",
+                    page,
                     attempted[:-1],
                     name,
+                    len(result.words),
                 )
             aligned = align_word_boxes([(result.engine, result.words)], page=page)
             merged = merged_text_from_words(aligned) or result.text
             return merged, aligned, [result]
 
-    raise RuntimeError(f"All configured OCR engines failed or unavailable: {order}")
+    raise RuntimeError(
+        f"page={page}: all configured OCR engines found no text or failed: {order} "
+        "(see preceding per-engine log lines for which)"
+    )
 
 
 async def _ensemble_ocr_page_multi(
@@ -451,7 +470,7 @@ async def _ensemble_ocr_page_multi(
         names.append(name)
 
     if not tasks:
-        raise RuntimeError("No OCR engines available")
+        raise RuntimeError(f"page={page}: no OCR engines available")
 
     raw = await asyncio.gather(*tasks, return_exceptions=True)
     engine_results: list[EnginePageResult] = []
@@ -459,16 +478,18 @@ async def _ensemble_ocr_page_multi(
 
     for name, item in zip(names, raw):
         if isinstance(item, Exception):
-            logger.warning("%s", _format_engine_failure(name, item))
+            logger.warning("page=%s %s", page, _format_engine_failure(name, item))
             continue
         text, conf, words = item
+        if not words:
+            logger.info("OCR engine %s found no words on page=%s", name, page)
         engine_results.append(
             EnginePageResult(engine=name, text=text, confidence=conf, words=words)
         )
         engine_words.append((name, words))
 
     if not engine_results:
-        raise RuntimeError("All OCR engines failed")
+        raise RuntimeError(f"page={page}: all available OCR engines failed")
 
     prefer_engine = settings.ocr_table_bias_engine if settings.ocr_table_bias_enabled else None
     aligned = align_word_boxes(

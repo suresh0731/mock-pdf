@@ -955,7 +955,13 @@ class RedactPipeline:
                             pages[idx].fitz_page, opts.dpi, idx
                         )
                     if not fallback_words:
-                        raise PipelineStageError("ensemble_ocr", "OCR ensemble failed", exc) from exc
+                        raise PipelineStageError(
+                            "ensemble_ocr",
+                            f"OCR ensemble failed on page_index={idx} ({type(exc).__name__}); "
+                            "see preceding app.services.ocr.ensemble log lines for the "
+                            "per-engine breakdown",
+                            exc,
+                        ) from exc
                     logger.warning(
                         "ensemble_ocr failed for page_index=%s (%s); falling back to "
                         "native PDF text layer",

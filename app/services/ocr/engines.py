@@ -224,9 +224,21 @@ def ocr_image_rapidocr(
     det_lang, rec_lang = _rapidocr_lang_params(langs)
     engine = _get_rapidocr_engine(det_lang, rec_lang)
     result = engine(np.array(image), return_word_box=True)
-    words = []
-    texts = []
-    confs = []
+    words: list[dict] = []
+    texts: list[str] = []
+    confs: list[float] = []
+    # A page/image with zero detected text is not an error — RapidOCR
+    # returns a default-constructed RapidOCROutput() for it, whose
+    # ``word_results`` is a *sentinel* ``(("", 1.0, None),)`` rather than
+    # an empty tuple (RapidOCROutput.__len__ is the documented way to
+    # detect this — see its docstring). Treating that sentinel as one
+    # real "line" of word tuples below and unpacking its first element
+    # (an empty string) as ``(word_text, score, box)`` raises
+    # ``ValueError: not enough values to unpack`` — this used to look
+    # like an engine failure/crash on every page with no text, when it
+    # is actually just "no words found".
+    if len(result) == 0:
+        return "", 0.0, []
     line_results = getattr(result, "word_results", None) or ()
     for line in line_results:
         for word_text, score, box in line:

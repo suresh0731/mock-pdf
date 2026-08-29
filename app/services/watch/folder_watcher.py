@@ -134,9 +134,20 @@ class FolderWatcher:
         try:
             pdf_bytes, audit, _session = await pipeline.run(file_bytes, path.name, RedactOptions())
         except PipelineStageError as exc:
+            # ``str(exc)`` is only the short stage message (e.g. "OCR
+            # ensemble failed") — the actual root cause exception chained
+            # via ``raise ... from exc`` (a specific engine/library
+            # failure) previously never reached the log at all, making
+            # every stage failure look identical regardless of cause.
+            # ``exc.cause`` here is always an infra/engine-level exception
+            # (unavailable model, bad config, corrupt page) — never OCR'd
+            # document text — so its type and message are safe to log in
+            # full, same as the traceback already logged below for
+            # genuinely unexpected exceptions.
             logger.error(
                 "watch: redaction failed for %s at stage=%s: %s — left in place for retry",
                 path, exc.stage, exc,
+                exc_info=exc.cause or exc,
             )
             return False
         except Exception:
