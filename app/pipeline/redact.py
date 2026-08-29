@@ -924,13 +924,14 @@ class RedactPipeline:
             # table — see ensemble.align_word_boxes's table_regions bias.
             table_regions = [b.bbox for b in blocks if b.block_type in ("table", "cell")]
 
+            ocr_engines_used: list[str] = []
             if page_kind == "digital":
                 # Native PDF text already extracted above (classify_and_extract) —
                 # skip OCR entirely for this page.
                 merged_text, ensemble_words = native_merged, native_words
             else:
                 try:
-                    merged_text, ensemble_words, _ = await ensemble_ocr_page(
+                    merged_text, ensemble_words, engine_results = await ensemble_ocr_page(
                         canonical.canonical_image,
                         canonical.page_index,
                         tess_lang,
@@ -938,6 +939,7 @@ class RedactPipeline:
                         table_regions=table_regions,
                         engine_filter=opts.ocr_engines,
                     )
+                    ocr_engines_used = [r.engine for r in engine_results]
                 except Exception as exc:
                     # Every configured OCR engine failed/returned nothing for
                     # this page (e.g. a low-contrast scan, or a "hybrid"
@@ -1002,6 +1004,30 @@ class RedactPipeline:
                 word_context = join_words_to_blocks(ensemble_words, blocks)
             except Exception as exc:
                 raise PipelineStageError("docling", "Structure extraction failed", exc) from exc
+
+            # One consolidated line tying together every input to the
+            # padding-geometry decision (apply_padding, further downstream)
+            # that's otherwise scattered across separate log lines from
+            # canonicalize_page/extract_structure/ensemble_ocr_page — the
+            # fastest way to diff "why did this page redact differently on
+            # machine A vs. machine B" without re-running the visualization
+            # script or comparing screenshots.
+            logger.info(
+                "page processed",
+                extra={
+                    "page_index": idx,
+                    "page_kind": page_kind,
+                    "blur_tier": canonical.transform.blur_tier,
+                    "blur_variance": canonical.transform.blur_variance,
+                    "skew_angle_deg": canonical.transform.skew_angle_deg,
+                    "structure_block_count": len(blocks),
+                    "structure_block_type_counts": dict(
+                        Counter(b.block_type for b in blocks)
+                    ),
+                    "ocr_word_count": len(ensemble_words),
+                    "ocr_engines_used": ocr_engines_used,
+                },
+            )
 
             page_states.append(
                 PageProcessState(

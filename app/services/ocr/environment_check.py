@@ -8,7 +8,10 @@ subset of engines happened to import successfully on a given machine.
 """
 
 import logging
+import platform
+import sys
 from dataclasses import dataclass, field
+from importlib import metadata as _importlib_metadata
 
 from app.config import get_settings
 from app.services.ocr.engines import (
@@ -16,6 +19,7 @@ from app.services.ocr.engines import (
     rapidocr_available,
     tesseract_available,
 )
+from app.services.structure.docling_adapter import docling_available
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,79 @@ _AVAILABILITY_CHECKS = {
     "easyocr": easyocr_available,
     "rapidocr": rapidocr_available,
 }
+
+# Package name -> module + attribute probed for a version string. Anything
+# missing/import-failing is reported as "not-installed" rather than raising —
+# this fingerprint must never block startup, only describe it.
+_VERSIONED_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("opencv-python", "cv2"),
+    ("numpy", "numpy"),
+    ("pillow", "PIL"),
+    ("scikit-image", "skimage"),
+    ("docling", "docling"),
+    ("rapidocr", "rapidocr"),
+    ("onnxruntime", "onnxruntime"),
+    ("easyocr", "easyocr"),
+    ("pytesseract", "pytesseract"),
+    ("pymupdf", "fitz"),
+)
+
+
+def _package_version(dist_name: str, module_name: str) -> str | None:
+    try:
+        module = __import__(module_name)
+    except ImportError:
+        return None
+    version = getattr(module, "__version__", None)
+    if version:
+        return str(version)
+    # Some packages (e.g. rapidocr) don't set __version__ on the module
+    # itself — fall back to the installed distribution's own metadata,
+    # which pip/uv always populate regardless of what the package exposes.
+    try:
+        return _importlib_metadata.version(dist_name)
+    except _importlib_metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _tesseract_binary_version() -> str | None:
+    if not tesseract_available():
+        return None
+    try:
+        import pytesseract
+
+        return str(pytesseract.get_tesseract_version())
+    except Exception:  # noqa: BLE001 - version probe must never fail startup
+        return None
+
+
+def log_environment_fingerprint() -> dict[str, object]:
+    """Log (and return) one consolidated snapshot of this machine's setup.
+
+    Intended to be called once at startup (see ``app.main``'s lifespan) so
+    that "laptop produced result A, server produced result B for the same
+    input" can be root-caused by diffing two log lines instead of two
+    screenshots — every dependency that can legitimately vary
+    machine-to-machine and change pipeline output (OCR engine
+    availability, library versions, OS/Python version) in one place.
+    """
+    package_versions = {
+        name: _package_version(name, module) for name, module in _VERSIONED_PACKAGES
+    }
+    fingerprint = {
+        "os": platform.platform(),
+        "python_version": sys.version.split()[0],
+        "engines_available": {
+            "tesseract": tesseract_available(),
+            "easyocr": easyocr_available(),
+            "rapidocr": rapidocr_available(),
+            "docling": docling_available(),
+        },
+        "tesseract_binary_version": _tesseract_binary_version(),
+        "package_versions": package_versions,
+    }
+    logger.info("environment fingerprint", extra=fingerprint)
+    return fingerprint
 
 
 @dataclass

@@ -14,6 +14,19 @@ class Settings(BaseSettings):
     app_name: str = "PII Redact Service"
     debug: bool = False
 
+    # --- Logging -------------------------------------------------------
+    # "json" (default) renders every logger.*(..., extra={...}) field
+    # inline as a parseable object per line — see app/logging_config.py's
+    # module docstring for why this matters: the default
+    # logging.basicConfig() formatter silently drops extra= fields
+    # entirely, which is why two machines' plain-text logs can look
+    # identical while the underlying decisions (blur tier, structure
+    # block counts, padding clamp source, ...) actually differed. "plain"
+    # keeps the same information in a human-readable line for local
+    # terminal reading.
+    log_level: str = "INFO"
+    log_format: str = "json"
+
     tesseract_cmd: str | None = None
     poppler_path: str | None = None
 

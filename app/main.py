@@ -10,11 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.mock_routes import router as mock_router
 from app.api.routes import router
 from app.config import get_settings
+from app.logging_config import configure_logging
 from app.services.ocr.engines import configure_tesseract
-from app.services.ocr.environment_check import enforce_required_engines
+from app.services.ocr.environment_check import enforce_required_engines, log_environment_fingerprint
 from app.services.watch.folder_watcher import FolderWatcher
 
-logging.basicConfig(level=logging.INFO)
+configure_logging(get_settings().log_level, get_settings().log_format)
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_tesseract()
+    # Logged first and unconditionally (unlike enforce_required_engines,
+    # which only checks Settings.ocr_required_engines) so a "why did this
+    # machine behave differently" investigation always has a same-shaped
+    # snapshot to diff against another machine's, even when every engine
+    # required is present and nothing looks wrong at startup.
+    log_environment_fingerprint()
     enforce_required_engines()
     settings.shard_base_path.mkdir(parents=True, exist_ok=True)
     (settings.shard_base_path / "audit" / "requests").mkdir(parents=True, exist_ok=True)

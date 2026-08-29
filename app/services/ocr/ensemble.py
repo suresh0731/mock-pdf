@@ -422,6 +422,21 @@ async def _ensemble_ocr_page_single(
                     name,
                     len(result.words),
                 )
+            # Always logged (not just the fallback case above) so which
+            # engine actually produced a given page's words is visible
+            # from logs alone — otherwise a "primary succeeded" run and a
+            # "primary silently unavailable, fell back" run look identical
+            # unless you already know to look for the warning's absence.
+            logger.info(
+                "OCR engine resolved for page",
+                extra={
+                    "page": page,
+                    "engine": name,
+                    "is_primary": name == settings.ocr_primary_engine,
+                    "word_count": len(result.words),
+                    "attempted_engines": list(attempted),
+                },
+            )
             aligned = align_word_boxes([(result.engine, result.words)], page=page)
             merged = merged_text_from_words(aligned) or result.text
             return merged, aligned, [result]
