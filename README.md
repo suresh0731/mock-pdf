@@ -88,6 +88,43 @@ Setting `WATCH_ENABLED=true` and starting the app normally
 
 To add a new curated mapping permanently, edit `mappings.seed.json` directly (or via `POST /v1/mappings/upload` CSV import → then copy the resulting rows into the seed file) rather than relying on an auto-learned local entry.
 
+## Debugging: comparing two machines via logs
+
+When the same file redacts differently on two machines (e.g. a laptop vs. a
+server), the fastest root-cause path is usually logs, not screenshots:
+
+- **Startup**: every process logs one `"environment fingerprint"` line (OS,
+  Python version, every OCR engine's availability, and installed versions of
+  the libraries most likely to drift — OpenCV, Docling, RapidOCR,
+  onnxruntime, EasyOCR, Tesseract binary, PyMuPDF). Diff this line between
+  the two machines first — a mismatched `docling`/`opencv-python` version is
+  the most common cause of two machines detecting different table/cell
+  geometry (and therefore different padding) from an identical image.
+- **Startup, config**: right after the fingerprint, one `"effective settings"`
+  line dumps every resolved `Settings` field (padding px per blur tier,
+  `restrict_to_known_mappings`, `img2table_min_table_iou`, every feature
+  toggle, ...). `.env.local` is git-ignored and machine-local by design, so
+  two machines can run identical code and identical package versions and
+  still behave differently because one has an override the other doesn't —
+  this line turns that into a one-line diff instead of re-deriving every
+  knob's value by hand on both machines. `api_key` is redacted.
+- **Per page**: one `"page processed"` line per page ties together
+  `blur_tier`/`blur_variance`/`skew_angle_deg`, structure block counts by
+  type, OCR word count, and which OCR engine actually produced those words
+  (`ocr_engines_used`) — the direct inputs to the padding decision in
+  `apply_padding`.
+- **Per redaction** (`LOG_LEVEL=DEBUG`): `app.services.pii.coordinate_map`
+  logs `"bbox padded and clamped"` for every redaction, showing whether the
+  padded box was clamped against a table cell, a neighboring word, or
+  neither, plus its final `x`/`y`/`w`/`h` — the exact "why is this box
+  bigger/smaller/misplaced on the other machine" answer.
+
+Logs render as one JSON object per line by default (`Settings.log_format`,
+default `"json"`) so every field above is directly diffable/greppable
+(`jq`, `grep`, plain `diff` of two saved log files) — set `log_format=plain`
+for a human-readable line instead. Level is `Settings.log_level` (default
+`"INFO"`; set `LOG_LEVEL=DEBUG` to also see the per-redaction padding line).
+
 ## Debugging: visualizing pipeline stages
 
 To find exactly where a redaction goes wrong (a table header swallowed by a redaction box, a wrong mock value, PII that never got detected, an over/under-padded box, ...), `scripts/visualize_pipeline_stages.py` re-derives every intermediate artifact `RedactPipeline` produces for **one page** and writes each stage as its own numbered, annotated PNG instead of only the final redacted output. It calls the exact same functions `RedactPipeline` calls internally (`extract_field_candidates`, `_collect_redactions`, ...) — it never changes production behavior, only observes it.
@@ -104,17 +141,17 @@ To find exactly where a redaction goes wrong (a table header swallowed by a reda
 | 8 | Brand zones | `FOOTER`/`IMAGE` zones (logos, stamps, signatures) painted on top of the PII redactions |
 | 9 | Final output | The **actual** production render path — real vector-native redaction for `digital` pages, paint-then-flatten raster for `scanned` pages |
 
-### Digital PDFs (text-layer PDFs, invoices exported from software, etc.)
+### Any PDF — digital (text-layer) *or* scanned/rasterized pages
 
-Run directly — the script takes a PDF path and a 1-indexed `--page`:
+The script always takes a PDF path — page selection goes through PyMuPDF's `doc.select` — so this is the same command whether the PDF has a real, selectable text layer (`page_kind=digital`, e.g. an invoice exported from software) or is just scanned/photographed pages saved as a PDF with no text layer at all (`page_kind=scanned`, e.g. a bank's scan-to-PDF export). Which one it is gets auto-detected per page by `app/services/ocr/native_text.py::classify_and_extract` (native text bypass) — you don't tell the script which; check stage 2's title banner (`page_kind=...`) to confirm what it detected:
 ```powershell
 python scripts\visualize_pipeline_stages.py path\to\document.pdf --page 1
 ```
 Images land in `pipeline_stages/` by default (override with `--out-dir`).
 
-### Scanned inputs (photographed/scanned JPG, PNG, TIFF)
+### Raw scanned images (JPG, PNG, TIFF — not already a PDF)
 
-The script always opens its input as a PDF (page selection goes through PyMuPDF's `doc.select`), so a raw image needs to be wrapped in a throwaway single-page PDF first. This doesn't change anything the pipeline sees: `app/services/ocr/page_renderer.py`'s `load_pages` treats a rendered PDF-page pixmap and a directly-loaded image identically, and the wrapped page still classifies as `page_kind=scanned` end-to-end (there's no text layer either way).
+This is the one case that needs an extra step: the script requires a PDF as input (again, for `doc.select` page selection), so a loose image file first needs wrapping in a throwaway single-page PDF. This doesn't change anything the pipeline sees — `app/services/ocr/page_renderer.py`'s `load_pages` treats a rendered PDF-page pixmap and a directly-loaded image identically, and the wrapped page still classifies as `page_kind=scanned` end-to-end (there's no text layer either way, same as a scanned PDF above):
 ```powershell
 python -c "from PIL import Image; Image.open('test-input\1000099358.jpg').convert('RGB').save('test-input\1000099358.pdf')"
 python scripts\visualize_pipeline_stages.py test-input\1000099358.pdf --page 1

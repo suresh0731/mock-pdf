@@ -12,6 +12,7 @@ import platform
 import sys
 from dataclasses import dataclass, field
 from importlib import metadata as _importlib_metadata
+from pathlib import Path
 
 from app.config import get_settings
 from app.services.ocr.engines import (
@@ -101,6 +102,36 @@ def log_environment_fingerprint() -> dict[str, object]:
     }
     logger.info("environment fingerprint", extra=fingerprint)
     return fingerprint
+
+
+# Never log these Settings fields, even redacted — secrets, not tunables.
+_SETTINGS_SECRET_FIELDS = frozenset({"api_key"})
+
+
+def log_effective_settings() -> dict[str, object]:
+    """Log (and return) every resolved ``Settings`` value for this process.
+
+    ``.env.local`` is git-ignored and machine-local by design (see
+    ``Settings.model_config``'s ``env_file``), which means every knob it can
+    override — padding px, blur thresholds, ``restrict_to_known_mappings``,
+    ``img2table_min_table_iou``, feature toggles, etc. — can legitimately
+    differ between two machines running the exact same code. A package/OS
+    version match (see ``log_environment_fingerprint``) does *not* imply a
+    config match. Logging the full resolved settings snapshot at startup
+    turns "does the server have some different override I don't know about"
+    into a one-line diff instead of a guessing game.
+    """
+    settings = get_settings()
+    values = settings.model_dump()
+    for field_name in _SETTINGS_SECRET_FIELDS:
+        if field_name in values:
+            values[field_name] = "***redacted***" if values[field_name] else ""
+    # Path objects (shard_base_path, mock_dictionary_path, ...) aren't
+    # JSON-native; stringify so the log line is diffable/greppable as text
+    # rather than falling back to JsonLogFormatter's repr() per-field.
+    values = {k: (str(v) if isinstance(v, Path) else v) for k, v in values.items()}
+    logger.info("effective settings", extra=values)
+    return values
 
 
 @dataclass

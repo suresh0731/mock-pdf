@@ -12,7 +12,11 @@ from app.api.routes import router
 from app.config import get_settings
 from app.logging_config import configure_logging
 from app.services.ocr.engines import configure_tesseract
-from app.services.ocr.environment_check import enforce_required_engines, log_environment_fingerprint
+from app.services.ocr.environment_check import (
+    enforce_required_engines,
+    log_effective_settings,
+    log_environment_fingerprint,
+)
 from app.services.watch.folder_watcher import FolderWatcher
 
 configure_logging(get_settings().log_level, get_settings().log_format)
@@ -29,6 +33,10 @@ async def lifespan(app: FastAPI):
     # snapshot to diff against another machine's, even when every engine
     # required is present and nothing looks wrong at startup.
     log_environment_fingerprint()
+    # .env.local is git-ignored/machine-local — a version/package match does
+    # NOT mean a config match. Log every resolved knob so a padding/table/
+    # restrict_to_known_mappings override on one machine is a log diff away.
+    log_effective_settings()
     enforce_required_engines()
     settings.shard_base_path.mkdir(parents=True, exist_ok=True)
     (settings.shard_base_path / "audit" / "requests").mkdir(parents=True, exist_ok=True)

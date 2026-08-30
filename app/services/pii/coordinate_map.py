@@ -247,4 +247,46 @@ def apply_padding(
             "h": padded.h,
         },
     )
+    if used_cell_clip:
+        _warn_if_cell_clamp_looks_oversized(bbox, padded, page_w, page_h)
     return padded
+
+
+# A legitimate table cell can genuinely dwarf the short PII value sitting
+# inside it (e.g. a wide "Bank Name" column holding a 3-letter value) — see
+# test_apply_padding_neighbor_clamp_ignored_when_cell_bbox_present — so
+# these thresholds intentionally stay generous and only *warn*, never
+# change behavior. They exist to catch the much rarer, much worse case: a
+# structure-extraction false positive (Docling/img2table misreading noise
+# on a photographed/scanned page as a table border) that hands
+# apply_padding one giant "cell" spanning an entire header/paragraph
+# block, silently painting over everything inside it — see this module's
+# apply_padding docstring: a cell-clamped box fills the *entire* cell
+# interior, so a wrong cell this large paints far more than intended.
+_SUSPICIOUS_CELL_CLAMP_BBOX_RATIO = 25.0
+_SUSPICIOUS_CELL_CLAMP_PAGE_AREA_PCT = 0.10
+
+
+def _warn_if_cell_clamp_looks_oversized(
+    bbox: BBox, padded: BBox, page_w: int, page_h: int
+) -> None:
+    bbox_area = bbox.w * bbox.h
+    padded_area = padded.w * padded.h
+    page_area = page_w * page_h
+    bbox_ratio = (padded_area / bbox_area) if bbox_area > 0 else float("inf")
+    page_pct = (padded_area / page_area) if page_area > 0 else 0.0
+    if bbox_ratio >= _SUSPICIOUS_CELL_CLAMP_BBOX_RATIO or page_pct >= _SUSPICIOUS_CELL_CLAMP_PAGE_AREA_PCT:
+        logger.warning(
+            "cell-clamped padding covers a suspiciously large area — likely a "
+            "structure-extraction false positive (Docling/img2table misread a "
+            "header/paragraph block as one table cell), not a real table cell; "
+            "this redaction may be painting over far more than the detected text",
+            extra={
+                "bbox_w": bbox.w,
+                "bbox_h": bbox.h,
+                "padded_w": padded.w,
+                "padded_h": padded.h,
+                "bbox_to_padded_area_ratio": round(bbox_ratio, 1),
+                "padded_pct_of_page_area": round(page_pct, 3),
+            },
+        )
