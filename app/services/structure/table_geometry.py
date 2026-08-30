@@ -147,6 +147,14 @@ def extract_table_geometry(image: Image.Image) -> list[DocBlock]:
         DocBlocks (`table` and `cell` types), or `[]` in degraded mode.
     """
     if not img2table_available():
+        # Mirrors docling_adapter.extract_structure's "structure degraded"
+        # warning: silently returning [] here (as before) is indistinguishable
+        # from "this page has no detectable table borders", so a missing
+        # package regresses every table's cell geometry back to Docling's
+        # own TableFormer output — exactly the "drop or merge cell text"
+        # failure mode this module exists to correct — with nothing in the
+        # logs to say so.
+        logger.warning("img2table degraded", extra={"reason": "unavailable"})
         return []
     try:
         tables = _run_img2table(image)

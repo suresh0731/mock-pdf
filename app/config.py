@@ -104,9 +104,17 @@ class Settings(BaseSettings):
     fuzzy_dictionary_scan_enabled: bool = True
     # Curated dictionary entries are verified ground truth (same trust
     # level mock_dictionary's own fuzzy resolution already extends them —
-    # see _TRUSTED_FUZZY_THRESHOLD there), so this uses the same threshold
+    # see _TRUSTED_FUZZY_THRESHOLD there), so this tracks that threshold
     # rather than fuzzy_match_threshold's stricter auto-vs-auto default.
-    fuzzy_dictionary_scan_threshold: float = 0.65
+    # Originally 0.65; raised alongside _TRUSTED_FUZZY_THRESHOLD to 0.90
+    # after finding this scan is span *discovery*, not just resolution —
+    # fuzz.partial_ratio_alignment only has to align part of the needle,
+    # so it can anchor "PT MNC Life Assurance" onto just the "life
+    # assurance" tail of an unrelated, cleanly-OCR'd "PT Prudential Life
+    # Assurance" and still score 0.76 (measured directly), well above the
+    # old 0.65 bar — creating a whole second, wrong-client redaction over
+    # text that already had nothing wrong with it.
+    fuzzy_dictionary_scan_threshold: float = 0.90
     # Restricts field-anchored detection to values already in the mock
     # dictionary — no brand-new auto-created entries for text nothing
     # matches. Table-cell OCR is noisy enough that free-running detection

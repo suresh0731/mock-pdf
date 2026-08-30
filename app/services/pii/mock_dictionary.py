@@ -45,13 +45,30 @@ _AUTO_SUFFIX_LENGTH = 6
 _AUTO_SUFFIX_FALLBACK_LENGTHS = (8, 12, 16, 32, 64)
 
 # Manually curated (assignment_source == "user") entries are verified ground
-# truth, so matching against them uses a much lower threshold than auto-vs-
-# auto matching. Calibrated against real OCR ensemble output on scanned bank
-# letters (see tests/test_mock_dictionary.py): garbled table-cell reads of a
-# known organization ("Cnartercd Standerd Custpay", "Terop Blife Stabill
-# Link Pendapatin") score 0.70-0.96 against their clean source text, while
-# unrelated organizations never exceed ~0.58 — comfortable separation.
-_TRUSTED_FUZZY_THRESHOLD = 0.65
+# truth, so matching against them uses a lower threshold than auto-vs-auto
+# matching. Originally 0.65, calibrated against real OCR ensemble output on
+# scanned bank letters (see tests/test_mock_dictionary.py): garbled
+# table-cell reads of a known organization ("Cnartercd Standerd Custpay",
+# "Terop Blife Stabill Link Pendapatin") score 0.70-0.96 against their clean
+# source text, while unrelated organizations never exceed ~0.58 in that
+# small hand-curated set.
+#
+# That separation doesn't hold once the dictionary is bulk-loaded from a
+# large real-world mapping table (hundreds of rows): sibling entities that
+# share a generic corporate shell — "PT <NAME> LIFE ASSURANCE" — routinely
+# score in the high 70s/80s against each other on nothing but the shared
+# "PT"/"LIFE"/"ASSURANCE" tokens (measured directly against
+# complete_client_mappings.csv: "PT Prudential Life Assurance" vs. the
+# unrelated "PT MNC Life Assurance" scores 0.7755 token_sort_ratio), which
+# used to clear 0.65 and get the wrong client's mock painted over a
+# correctly-OCR'd name. Raised to 0.90 — above even the auto-vs-auto
+# default — because a bulk-loaded dictionary this size needs a *stricter*
+# bar than a handful of manually verified rows, not a looser one. This
+# still doesn't fully separate the family-of-similarly-named-funds case
+# (many genuinely distinct "PT PRUDENTIAL LIFE ASSURANCE - <FUND CODE>"
+# rows score >=0.90 against each other) — that needs spatial/contextual
+# disambiguation, not a name-similarity threshold, and remains a known gap.
+_TRUSTED_FUZZY_THRESHOLD = 0.90
 
 # Every auto-assigned mock value shares one generic prefix — matching (and
 # the mock value itself) is by name text only, irrespective of whatever PII
