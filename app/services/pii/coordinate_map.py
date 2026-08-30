@@ -244,6 +244,7 @@ def apply_padding(
             "redaction_id": redaction_id,
             "tier": tier,
             "pad": pad,
+            "multiline": multiline,
             "page_w": page_w,
             "page_h": page_h,
             "cell_clamped": used_cell_clip,

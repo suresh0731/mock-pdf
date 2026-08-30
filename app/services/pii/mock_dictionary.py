@@ -561,6 +561,20 @@ class _InMemoryDictionary:
             self._log("delete", entry)
             self._after_mutate()
 
+    def clear_all(self) -> int:
+        """Remove every mapping from memory and the persisted snapshot.
+
+        Returns:
+            Number of mappings removed.
+        """
+        with self._lock:
+            cleared_count = len(self._by_id)
+            self._by_id.clear()
+            self._by_normalized.clear()
+            self._after_mutate()
+            logger.info("mock_clear_all count=%s", cleared_count)
+            return cleared_count
+
 
 class MockDictionaryStore(_InMemoryDictionary):
     """Thread-safe mock dictionary with write-through snapshot.

@@ -621,7 +621,23 @@ def _build_mappings_tab(ui: Any) -> None:
                 )
                 _reload_mapping_panel()
 
-            build_mapping_toolbar(_download_mappings, _download_template, _import_file)
+            def _clear_all_mappings() -> None:
+                try:
+                    cleared_count = get_mock_store().clear_all()
+                    ui.notify(
+                        f"Cleared {cleared_count} mappings and the mapping cache",
+                        type="positive",
+                    )
+                except Exception:
+                    ui.notify("Could not clear mappings", type="negative")
+                _reload_mapping_panel()
+
+            build_mapping_toolbar(
+                _download_mappings,
+                _download_template,
+                _import_file,
+                _clear_all_mappings,
+            )
 
         mapping_container = ui.column().classes("w-full")
 

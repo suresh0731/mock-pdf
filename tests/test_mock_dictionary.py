@@ -171,6 +171,20 @@ def test_delete_then_resolve_recovers_same_deterministic_mock(store: MockDiction
     assert second.mapping_id in ids
 
 
+def test_clear_all_removes_memory_and_persisted_mappings(tmp_path: Path) -> None:
+    snapshot = tmp_path / "mappings.json"
+    store = MockDictionaryStore(snapshot_path=snapshot)
+    store.resolve(_SOURCE)
+    store.upsert("Acme Corp", "ACME")
+
+    assert store.clear_all() == 2
+    assert store.list() == []
+
+    persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert persisted["entries"] == []
+    assert MockDictionaryStore(snapshot_path=snapshot).list() == []
+
+
 def test_override_unknown_id_raises_mapping_not_found(
     store: MockDictionaryStore, tmp_path: Path
 ) -> None:

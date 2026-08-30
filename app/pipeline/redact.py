@@ -620,6 +620,13 @@ def _apply_spillover_safety_net(
 
 
 _LINE_WRAP_ROW_Y_OVERLAP_FRACTION = 0.5
+# Caps how much a single word can stretch a _row_clusters envelope beyond
+# the row-set's own typical (median) word height. Wide enough that a
+# genuinely tall word (an accented capital, a superscript) isn't
+# penalized, but tight enough that a mis-segmented OCR box spanning two
+# real text lines (often ~2x+ the typical height) can't drag a real next
+# line into the same cluster.
+_ROW_CLUSTER_MAX_HEIGHT_FACTOR = 1.5
 # How much wider the combined union of a match's per-line word clusters
 # must be than the clusters' own widths added together before it's treated
 # as a genuine line-wrap split rather than compactly co-located text (see
@@ -635,15 +642,50 @@ def _row_clusters(words: list[EnsembleWord]) -> list[list[EnsembleWord]]:
     matched span's own words sit on one visual line or spill across more
     than one (see ``_line_wrap_clusters``). Returned in top-to-bottom
     reading order.
+
+    The overlap check is measured against ``typical_h`` — the *median*
+    word height across ``words`` — rather than trusting each word's own
+    ``bbox.h``. On a heavily blurred/warped scan, an OCR engine's line
+    segmentation can misfire and hand back one word's box tall enough to
+    span two physical text lines (see ``native_text``/``ensemble`` box-
+    height notes). Two safeguards keep that one inflated box from poisoning
+    the whole clustering pass:
+
+    1. The overlap threshold for that word is measured against
+       ``typical_h``, not its own bloated ``bbox.h`` — so it still merges
+       into the row it visually starts on.
+    2. Once merged, its contribution to the cluster's own vertical
+       *envelope* is capped at ``_ROW_CLUSTER_MAX_HEIGHT_FACTOR *
+       typical_h`` — otherwise the cluster's bottom edge balloons out to
+       the bloated word's real bottom, and the next line down then looks
+       like it overlaps this (falsely enlarged) envelope too, chain-
+       merging a line it never actually touched.
+
+    Getting this wrong feeds ``multiline`` in
+    ``_collect_redactions``/``apply_padding``, which relies on this
+    function correctly detecting >1 row to suppress top/bottom padding —
+    a wrongly-merged two-line value gets the normal per-tier pad added on
+    top of its already two-line-tall box instead.
     """
+    if not words:
+        return []
     ordered = sorted(words, key=lambda w: (w.bbox.y, w.bbox.x))
+    heights = sorted(w.bbox.h for w in ordered if w.bbox.h > 0)
+    typical_h = heights[len(heights) // 2] if heights else 1
+    max_h = typical_h * _ROW_CLUSTER_MAX_HEIGHT_FACTOR
+
+    def _capped_bottom(w: EnsembleWord) -> float:
+        return w.bbox.y + min(w.bbox.h, max_h)
+
     clusters: list[list[EnsembleWord]] = []
     for w in ordered:
+        w_bottom = _capped_bottom(w)
         for cluster in clusters:
             cy1 = min(c.bbox.y for c in cluster)
-            cy2 = max(c.bbox.y + c.bbox.h for c in cluster)
-            overlap = min(cy2, w.bbox.y + w.bbox.h) - max(cy1, w.bbox.y)
-            if overlap > _LINE_WRAP_ROW_Y_OVERLAP_FRACTION * min(cy2 - cy1, w.bbox.h):
+            cy2 = max(_capped_bottom(c) for c in cluster)
+            overlap = min(cy2, w_bottom) - max(cy1, w.bbox.y)
+            ref_h = min(cy2 - cy1, w_bottom - w.bbox.y, typical_h)
+            if overlap > _LINE_WRAP_ROW_Y_OVERLAP_FRACTION * ref_h:
                 cluster.append(w)
                 break
         else:

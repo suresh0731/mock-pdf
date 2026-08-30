@@ -240,6 +240,28 @@ def test_row_clusters_splits_words_on_different_lines():
     assert clusters == [[top], [bottom]]
 
 
+def test_row_clusters_splits_two_real_lines_despite_one_inflated_word_box():
+    """A blurred/warped scan can make one OCR word's box come back tall
+    enough to span two physical text lines (bbox.h far larger than its
+    row's real line height) even though the words themselves sit on two
+    clearly separate lines. Using that one inflated height as the overlap
+    denominator would make the lines look >50% overlapping and collapse
+    them into a single row — which then wrongly reports a two-line value
+    as single-line (``multiline=False``) and lets ``apply_padding`` add
+    the normal top/bottom pad on top of an already two-line-tall box."""
+    line1_a = _word("TM", 10, 20, 20, 12)
+    line1_b = _word("DPLK", 35, 20, 30, 12)
+    # "Fixed" has a normal line-1 y-position but a bloated height that
+    # bridges down into line 2's territory (y in [20, 55), vs. the other
+    # line-1 words' y in [20, 32)).
+    line1_bloated = _word("Fixed", 70, 20, 30, 35)
+    line2 = _word("FundII", 10, 45, 30, 12)
+    clusters = _row_clusters([line1_a, line1_b, line1_bloated, line2])
+    assert len(clusters) == 2
+    assert line2 not in clusters[0]
+    assert clusters[1] == [line2]
+
+
 def test_line_wrap_clusters_none_for_single_line_match():
     a = _word("John", 10, 20, 30, 10)
     b = _word("Smith", 45, 20, 30, 10)

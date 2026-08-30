@@ -160,6 +160,7 @@ def build_mapping_toolbar(
     on_download_mappings: Callable[[], None],
     on_download_template: Callable[[], None],
     on_import_file: Callable[[object], None],
+    on_clear_all: Callable[[], None] | None = None,
 ) -> None:
     """NiceGUI: CSV download/upload controls for the mock dictionary.
 
@@ -172,6 +173,8 @@ def build_mapping_toolbar(
         on_download_mappings: Triggered by the "Download mappings" button.
         on_download_template: Triggered by the "Download template" button.
         on_import_file: Receives the NiceGUI upload event for a chosen CSV.
+        on_clear_all: Triggered after the user confirms every mapping should
+            be removed.
     """
     from nicegui import ui  # type: ignore[import-not-found]
 
@@ -199,6 +202,38 @@ def build_mapping_toolbar(
                 "w-full"
             ).tooltip(
                 "Add new mappings from a CSV — existing ones are never overwritten"
+            )
+        if on_clear_all is not None:
+            def _confirm_clear_all() -> None:
+                with ui.dialog() as dialog, ui.card().classes(
+                    "bg-slate-800 text-slate-100 gap-3 max-w-md"
+                ):
+                    ui.label("Clear all mappings?").classes(
+                        "text-base font-semibold text-white"
+                    )
+                    ui.label(
+                        "This permanently removes every current mapping and "
+                        "clears the mapping cache. Future runs will build a "
+                        "new set of mappings."
+                    ).classes("text-sm text-slate-400")
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+
+                        def _do_clear() -> None:
+                            dialog.close()
+                            on_clear_all()
+
+                        ui.button(
+                            "Clear all", icon="delete_forever", on_click=_do_clear
+                        ).props("color=negative unelevated")
+                dialog.open()
+
+            ui.button(
+                "Clear all mappings",
+                icon="delete_forever",
+                on_click=_confirm_clear_all,
+            ).props("color=negative outline").tooltip(
+                "Remove every mapping and clear the mapping cache"
             )
 
 
