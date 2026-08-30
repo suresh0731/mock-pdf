@@ -171,6 +171,37 @@ def _enclosing_cell_bbox(
     return None
 
 
+def _filter_words_to_cell(
+    matched_words: list[EnsembleWord], cell_bbox: BBox
+) -> list[EnsembleWord] | None:
+    """Drop any word whose own center falls outside ``cell_bbox``.
+
+    A genuine multi-line wrap keeps every one of its words inside the
+    same cell; a word that doesn't belong (see the call site's comment
+    on the reading-order/merged-text corruption this guards against) is
+    dropped rather than trusted. Returns ``None`` when every word is
+    already coherent (nothing changed, caller keeps its existing bbox)
+    or when filtering would remove every word (an all-or-nothing miss
+    means the cell itself is unreliable for this match, not that one
+    stray word snuck in — safer to leave the original union untouched
+    than to discard the whole match's geometry).
+
+    Args:
+        matched_words: Words backing the current union bbox.
+        cell_bbox: The table cell the union bbox resolved to.
+
+    Returns:
+        The coherent-only subset, or ``None`` if no filtering should be
+        applied.
+    """
+    if not matched_words:
+        return None
+    coherent = [w for w in matched_words if _point_in_bbox(cell_bbox, *_bbox_center(w.bbox))]
+    if not coherent or len(coherent) == len(matched_words):
+        return None
+    return coherent
+
+
 def _row_neighbor_clamp_x(
     bbox: BBox, words: list[EnsembleWord], excluded_ids: set[int]
 ) -> tuple[float | None, float | None]:
@@ -583,6 +614,7 @@ def _apply_spillover_safety_net(
             left_neighbor_x=left_neighbor_x,
             right_neighbor_x=right_neighbor_x,
             multiline=multiline,
+            redaction_id=target.region_id,
         )
         target.engines_seen = sorted(set(target.engines_seen) | set(word.engines))
 
@@ -1205,6 +1237,13 @@ class RedactPipeline:
                     )
 
             for start, end, entity_type, score, term, _field_role, _account_number, cand_words in spans:
+                # Joins this redaction's "span mapped to bbox" / "bbox
+                # padded and clamped" / "redaction scored" / "mock_resolve"
+                # debug lines (otherwise scattered/interleaved across
+                # modules with every other redaction on the page) into one
+                # traceable identity — deterministic from the candidate's
+                # own char span, no extra state needed.
+                redaction_id = f"p{canonical.page_index}:{start}-{end}"
                 if cand_words:
                     # Field-anchored candidate: geometry/text come straight from
                     # the words the extractor matched, not from start/end — a
@@ -1215,7 +1254,9 @@ class RedactPipeline:
                     bbox = union_bbox(matched_words)
                     source_text = " ".join(w.text for w in matched_words)
                 else:
-                    bbox = map_span_to_ensemble_bbox(start, end, ensemble_words, merged_text)
+                    bbox = map_span_to_ensemble_bbox(
+                        start, end, ensemble_words, merged_text, redaction_id=redaction_id
+                    )
                     matched_words = words_for_span(start, end, ensemble_words) if bbox else []
                     source_text = merged_text[start:end]
                 if bbox is None:
@@ -1245,6 +1286,24 @@ class RedactPipeline:
 
                 word_bboxes = [w.bbox for w in matched_words] if matched_words else None
                 cell_bbox = _enclosing_cell_bbox(bbox, state.blocks, word_bboxes=word_bboxes)
+
+                # A merged_text char-range match (the ``else`` branch above,
+                # as opposed to a field-anchored ``cand_words`` candidate)
+                # can pick up a word from an unrelated block when the
+                # ensemble's reading order glitches at a row/column
+                # boundary (see ensemble.py's _reading_order docstring) —
+                # words_for_span/union_bbox has no spatial awareness, so
+                # the resulting union silently spans both the real match
+                # and the stray word's actual location. apply_padding's
+                # cell-clamp never shrinks below the union's own height,
+                # so an inflated union here would otherwise paint past the
+                # cell into whatever sits above/below it.
+                if cell_bbox is not None and not cand_words:
+                    filtered = _filter_words_to_cell(matched_words, cell_bbox)
+                    if filtered is not None:
+                        matched_words = filtered
+                        bbox = union_bbox(matched_words)
+                        source_text = " ".join(w.text for w in matched_words)
 
                 # A non-tabular match whose own words wrap across a real
                 # PDF line break (some words at the tail of one line, the
@@ -1300,6 +1359,7 @@ class RedactPipeline:
                         left_neighbor_x=left_neighbor_x,
                         right_neighbor_x=right_neighbor_x,
                         multiline=sub_multiline,
+                        redaction_id=redaction_id,
                     )
                     if _padded_overlaps_existing(sub_padded, page_redactions):
                         continue
@@ -1331,6 +1391,7 @@ class RedactPipeline:
                     entry.mapping_id,
                     entity_type,
                     entry.assignment_source,
+                    extra={"redaction_id": redaction_id},
                 )
 
                 ctx = None
@@ -1352,7 +1413,9 @@ class RedactPipeline:
                     if first_idx is not None:
                         ctx = word_context.get(first_idx)
 
-                confidence, breakdown = score_redaction(score, matched_words, ctx)
+                confidence, breakdown = score_redaction(
+                    score, matched_words, ctx, redaction_id=redaction_id
+                )
                 engines_seen = sorted({e for w in matched_words for e in w.engines})
                 # When the match was split across a line wrap, only the
                 # cluster carrying the most of the actual matched text

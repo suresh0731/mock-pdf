@@ -11,6 +11,7 @@ from app.models.pii_chunk import BBox
 from app.pipeline.redact import (
     _char_ranges_overlap,
     _enclosing_cell_bbox,
+    _filter_words_to_cell,
     _line_wrap_clusters,
     _mask_claimed_ranges,
     _redaction_boxes_conflict,
@@ -98,6 +99,44 @@ def test_enclosing_cell_bbox_word_vote_picks_majority_cell():
     ]
     result = _enclosing_cell_bbox(union, [amount, name], word_bboxes=word_bboxes)
     assert result == name.bbox
+
+
+# --- _filter_words_to_cell -------------------------------------------------
+
+
+def test_filter_words_to_cell_drops_word_outside_cell():
+    """A merged_text char-range match that swept in one word from a
+    paragraph line above the table (see the reading-order corruption
+    this guards against) loses that word once a cell is known."""
+    cell = _cell(260, 677, 200, 81)
+    in_cell = _word("CUSTODIAN_A", 265, 690, 90, 40)
+    stray_above = _word("kepada", 200, 650, 50, 20)  # center y=660, outside cell
+    result = _filter_words_to_cell([stray_above, in_cell], cell.bbox)
+    assert result == [in_cell]
+
+
+def test_filter_words_to_cell_returns_none_when_all_words_coherent():
+    """A genuine multi-line wrap (every word's center inside the same
+    cell) is left untouched — no filtering needed."""
+    cell = _cell(0, 0, 200, 200)
+    line1 = _word("Maksima", 10, 10, 60, 20)
+    line2 = _word("Plus", 10, 100, 60, 20)
+    assert _filter_words_to_cell([line1, line2], cell.bbox) is None
+
+
+def test_filter_words_to_cell_returns_none_when_no_word_matches():
+    """All-or-nothing miss: if every word's center falls outside the
+    cell, the cell itself is unreliable for this match — leave the
+    original union untouched rather than discarding it entirely."""
+    cell = _cell(1000, 1000, 50, 50)
+    w1 = _word("foo", 0, 0, 10, 10)
+    w2 = _word("bar", 20, 0, 10, 10)
+    assert _filter_words_to_cell([w1, w2], cell.bbox) is None
+
+
+def test_filter_words_to_cell_empty_input():
+    cell = _cell(0, 0, 50, 50)
+    assert _filter_words_to_cell([], cell.bbox) is None
 
 
 # --- _row_neighbor_clamp_x ------------------------------------------------

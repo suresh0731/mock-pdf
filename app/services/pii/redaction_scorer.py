@@ -40,6 +40,8 @@ def score_redaction(
     presidio_score: float,
     matched_words: list[EnsembleWord],
     structural_context: StructuralContext | None,
+    *,
+    redaction_id: str | None = None,
 ) -> tuple[float, ConfidenceBreakdown]:
     """Composite confidence per 1A Stage 3b.
 
@@ -47,6 +49,11 @@ def score_redaction(
         presidio_score: Detector score for the span (0–1).
         matched_words: Ensemble words overlapping the span.
         structural_context: Spatial-join context, or ``None`` if orphan.
+        redaction_id: Optional caller-assigned correlation ID, stamped
+            onto this debug line only so it can be joined with
+            ``ensemble_mapper``'s "span mapped to bbox" and
+            ``coordinate_map``'s "bbox padded and clamped" lines for the
+            same redaction. Never affects the returned score.
 
     Returns:
         Rounded composite score and a ``ConfidenceBreakdown`` with each
@@ -70,6 +77,7 @@ def score_redaction(
     logger.debug(
         "redaction scored",
         extra={
+            "redaction_id": redaction_id,
             "presidio": round(presidio_score, 4),
             "ocr": round(ocr, 4),
             "agreement": round(agreement, 4),

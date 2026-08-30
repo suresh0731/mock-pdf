@@ -103,6 +103,7 @@ def apply_padding(
     left_neighbor_x: float | None = None,
     right_neighbor_x: float | None = None,
     multiline: bool = False,
+    redaction_id: str | None = None,
 ) -> BBox:
     """Expand by tier px on each edge; clamp to containment context; w/h at least 1.
 
@@ -163,6 +164,12 @@ def apply_padding(
             Extra vertical slack on an already-tall, multi-line box risks
             bleeding into a tightly-packed neighboring row; left/right
             padding is unaffected.
+        redaction_id: Optional caller-assigned correlation ID (e.g.
+            ``"{page}:{start}:{end}"`` or a ``RedactionRegion.region_id``),
+            stamped onto this call's debug/warning lines only so they can
+            be joined with ``ensemble_mapper``'s "span mapped to bbox" and
+            ``redaction_scorer``'s "redaction scored" lines for the same
+            redaction. Never affects the returned geometry.
 
     Returns:
         Padded and clamped box. Invalid page size still clamps (may be 1×1).
@@ -234,6 +241,7 @@ def apply_padding(
     logger.debug(
         "bbox padded and clamped",
         extra={
+            "redaction_id": redaction_id,
             "tier": tier,
             "pad": pad,
             "page_w": page_w,
@@ -248,7 +256,7 @@ def apply_padding(
         },
     )
     if used_cell_clip:
-        _warn_if_cell_clamp_looks_oversized(bbox, padded, page_w, page_h)
+        _warn_if_cell_clamp_looks_oversized(bbox, padded, page_w, page_h, redaction_id=redaction_id)
     return padded
 
 
@@ -268,7 +276,7 @@ _SUSPICIOUS_CELL_CLAMP_PAGE_AREA_PCT = 0.10
 
 
 def _warn_if_cell_clamp_looks_oversized(
-    bbox: BBox, padded: BBox, page_w: int, page_h: int
+    bbox: BBox, padded: BBox, page_w: int, page_h: int, *, redaction_id: str | None = None
 ) -> None:
     bbox_area = bbox.w * bbox.h
     padded_area = padded.w * padded.h
@@ -282,6 +290,7 @@ def _warn_if_cell_clamp_looks_oversized(
             "header/paragraph block as one table cell), not a real table cell; "
             "this redaction may be painting over far more than the detected text",
             extra={
+                "redaction_id": redaction_id,
                 "bbox_w": bbox.w,
                 "bbox_h": bbox.h,
                 "padded_w": padded.w,

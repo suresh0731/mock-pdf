@@ -319,13 +319,40 @@ def map_docling_items(items: Iterable[object], page_h: int) -> list[DocBlock]:
     return blocks
 
 
-def _blocks_from_docling(image: Image.Image) -> list[DocBlock]:
-    from docling.document_converter import DocumentConverter
+def _docling_converter() -> object:
+    """``DocumentConverter`` with an explicit OCR recognition language.
 
+    Docling's own internal OCR (used here only for layout/table
+    structure — separate from this app's own PII-OCR pass in
+    ``app/services/ocr``) defaults ``RapidOcrOptions.lang`` to
+    ``["chinese"]`` when left unconfigured — not a locale Docling infers
+    from the page, just the library's own hardcoded default. Every
+    document this pipeline processes is Latin-script (Indonesian/English
+    bank paperwork), so leaving that default in place silently runs
+    layout/table detection through a Chinese-tuned recognizer, degrading
+    the very structure geometry (blocks, cells) padding's cell-clamp
+    trusts — see ``app/pipeline/redact.py``'s reading-order/cell-clamp
+    guard for the failure mode this produces downstream.
+    """
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
+
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.ocr_options = RapidOcrOptions(lang=["english"])
+    return DocumentConverter(
+        format_options={
+            InputFormat.IMAGE: ImageFormatOption(pipeline_options=pipeline_options),
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        }
+    )
+
+
+def _blocks_from_docling(image: Image.Image) -> list[DocBlock]:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "page.png"
         image.save(path, format="PNG")
-        converter = DocumentConverter()
+        converter = _docling_converter()
         result = converter.convert(str(path))
         doc = result.document
         return map_docling_items(doc.iterate_items(), image.height)

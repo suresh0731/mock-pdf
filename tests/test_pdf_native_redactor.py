@@ -147,6 +147,38 @@ def test_redact_image_regions_draws_mock_value_when_present():
     assert "FOOTER" in page.get_text()
 
 
+def test_redact_text_regions_uses_original_span_size_not_padded_box_height():
+    """The padded box is deliberately larger than the glyphs it covers
+    (see the module docstring on padding) — a height-derived guess would
+    render the mock value bigger than the original text actually was.
+    Using the overlapping span's own point size should track the
+    original size instead, even though the redaction box itself is
+    padded well beyond the text's tight bbox.
+    """
+    page = _new_page()
+    page.insert_text((10, 40), "Small Label", fontsize=8)
+    rect = page.search_for("Small Label")[0]
+    # Pad the box far past the actual text height, mimicking a
+    # generously-padded OCR/detection box.
+    padded = fitz.Rect(rect.x0 - 2, rect.y0 - 20, rect.x1 + 2, rect.y1 + 20)
+    px, py, pw, ph = _pixel_rect(padded)
+    region = _region(x=px, y=py, w=pw, h=ph, mock_value="REPLACED")
+
+    redact_text_regions(page, [region], _DPI)
+
+    sizes = [
+        round(span["size"])
+        for block in page.get_text("dict").get("blocks", [])
+        for line in block.get("lines", [])
+        for span in line.get("spans", [])
+        if "REPLACED" in span.get("text", "")
+    ]
+    assert sizes, "expected the inserted mock text span to be found"
+    # Height-derived guess from a ~55pt-tall padded box would be ~38pt;
+    # tracking the original 8pt span keeps it close to that instead.
+    assert sizes[0] <= 12
+
+
 def test_phases_run_in_order_text_then_image_on_same_page():
     """Applying the two phases sequentially (as the renderer does) must
     not have either phase disturb regions the other phase owns."""

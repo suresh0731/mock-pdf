@@ -8,6 +8,7 @@ from app.models.pii_chunk import BBox
 from app.services.ocr.ensemble_types import EnsembleWord
 from app.services.structure.docling_adapter import (
     DocBlock,
+    _docling_converter,
     bbox_from_prov,
     canonical_block_type,
     extract_structure,
@@ -31,6 +32,21 @@ def _word(text: str, x: int, y: int, w: int, h: int) -> EnsembleWord:
         char_start=0,
         char_end=len(text),
     )
+
+
+def test_docling_converter_configures_non_chinese_ocr_language():
+    """RapidOcrOptions.lang defaults to ["chinese"] when Docling's
+    DocumentConverter is left unconfigured (a library default, not a
+    locale it infers from the page) — every document this pipeline
+    handles is Latin-script, so the converter must override it."""
+    pytest.importorskip("docling")
+    from docling.datamodel.base_models import InputFormat
+
+    converter = _docling_converter()
+    for fmt in (InputFormat.IMAGE, InputFormat.PDF):
+        ocr_options = converter.format_to_options[fmt].pipeline_options.ocr_options
+        assert ocr_options.lang != ["chinese"]
+        assert ocr_options.lang == ["english"]
 
 
 def _block(

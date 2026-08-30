@@ -44,7 +44,12 @@ def union_bbox(words: list[EnsembleWord]) -> BBox | None:
 
 
 def map_span_to_ensemble_bbox(
-    start: int, end: int, words: list[EnsembleWord], merged_text: str
+    start: int,
+    end: int,
+    words: list[EnsembleWord],
+    merged_text: str,
+    *,
+    redaction_id: str | None = None,
 ) -> BBox | None:
     """Union bbox of words overlapping the span, or None if none / invalid.
 
@@ -54,6 +59,13 @@ def map_span_to_ensemble_bbox(
         words: Ensemble words with char offsets in the same space.
         merged_text: Unused positional arg kept for pipeline compatibility.
             Must not be sliced or logged.
+        redaction_id: Optional caller-assigned correlation ID (e.g.
+            ``"{page}:{start}:{end}"``), stamped onto this debug line only
+            so it can be joined with ``coordinate_map``'s "bbox padded and
+            clamped" and ``redaction_scorer``'s "redaction scored" lines
+            for the same redaction — otherwise these three lines are only
+            distinguishable by re-deriving from geometry/ordering. Never
+            used for matching logic.
 
     Returns:
         Union bbox of overlapping words, or ``None`` when there is no match
@@ -65,12 +77,13 @@ def map_span_to_ensemble_bbox(
     if box is None:
         logger.debug(
             "span mapping produced no bbox",
-            extra={"start": start, "end": end, "word_count": 0},
+            extra={"redaction_id": redaction_id, "start": start, "end": end, "word_count": 0},
         )
         return None
     logger.debug(
         "span mapped to bbox",
         extra={
+            "redaction_id": redaction_id,
             "start": start,
             "end": end,
             "word_count": len(matched),

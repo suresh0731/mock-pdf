@@ -120,24 +120,42 @@ def _apply_redactions_safely(page: "fitz.Page") -> None:
     )
 
 
-def _detect_page_font_name(page: "fitz.Page") -> str:
-    """Guess whether ``page``'s body text is serif or sans-serif and
-    return the matching PyMuPDF built-in font alias.
-
-    Must be called *before* ``apply_redactions`` removes any text —
-    both call sites in this module sample the page while it's still
-    intact. Picking the wrong family (e.g. always defaulting to
-    Helvetica on a Times New Roman bank statement) is the main reason a
-    vector-native mock replacement can look like an obviously pasted-on
-    patch rather than a natural continuation of the line: the box/text
-    deletion and reinsertion is genuine either way, but a jarring font
-    mismatch makes it *look* fake. Falls back to Helvetica when nothing
-    conclusive is found (matches the module's original default).
+def _get_page_text_dict(page: "fitz.Page") -> dict:
+    """``page.get_text("dict")``, or ``{}`` on failure — the single
+    snapshot both :func:`_detect_page_font_name` and
+    :func:`_region_font_and_size` read from. Must be captured *before*
+    ``apply_redactions`` removes any text — both call sites in this
+    module sample the page while it's still intact.
     """
     try:
-        page_dict = page.get_text("dict")
+        return page.get_text("dict")
     except Exception:
-        return _FALLBACK_FONT_NAME
+        return {}
+
+
+def _font_family_from_name(font_name: str) -> str:
+    """Map a raw PDF span font name (e.g. ``"TimesNewRomanPSMT"``) to
+    the closest PyMuPDF built-in alias via the serif name-hint list.
+    """
+    if any(hint in font_name for hint in _SERIF_NAME_HINTS):
+        return _SERIF_FONT_NAME
+    return _FALLBACK_FONT_NAME
+
+
+def _detect_page_font_name(page_dict: dict) -> str:
+    """Guess whether the page's body text is serif or sans-serif and
+    return the matching PyMuPDF built-in font alias — the page-wide
+    fallback used whenever a region has no overlapping original span
+    (see :func:`_region_font_and_size`).
+
+    Picking the wrong family (e.g. always defaulting to Helvetica on a
+    Times New Roman bank statement) is the main reason a vector-native
+    mock replacement can look like an obviously pasted-on patch rather
+    than a natural continuation of the line: the box/text deletion and
+    reinsertion is genuine either way, but a jarring font mismatch makes
+    it *look* fake. Falls back to Helvetica when nothing conclusive is
+    found (matches the module's original default).
+    """
     serif_chars = 0
     sans_chars = 0
     for block in page_dict.get("blocks", []):
@@ -147,8 +165,7 @@ def _detect_page_font_name(page: "fitz.Page") -> str:
                 n = len(text.strip())
                 if n == 0:
                     continue
-                font = span.get("font", "").lower()
-                if any(hint in font for hint in _SERIF_NAME_HINTS):
+                if _font_family_from_name(span.get("font", "").lower()) == _SERIF_FONT_NAME:
                     serif_chars += n
                 else:
                     sans_chars += n
@@ -157,32 +174,87 @@ def _detect_page_font_name(page: "fitz.Page") -> str:
     return _FALLBACK_FONT_NAME
 
 
+def _overlap_area(a: fitz.Rect, b: fitz.Rect) -> float:
+    """Plain rectangle-intersection area; 0 when disjoint. Computed from
+    raw coordinates rather than fitz's ``&`` operator so this doesn't
+    depend on how a given PyMuPDF version represents an empty result.
+    """
+    width = min(a.x1, b.x1) - max(a.x0, b.x0)
+    height = min(a.y1, b.y1) - max(a.y0, b.y0)
+    if width <= 0 or height <= 0:
+        return 0.0
+    return width * height
+
+
+def _region_font_and_size(
+    page_dict: dict, rect: fitz.Rect, fallback_font_name: str
+) -> tuple[str, float | None]:
+    """Original span (font family + point size) whose bbox overlaps
+    ``rect`` the most, so the replacement text tracks what was actually
+    printed at that spot instead of a single page-wide family plus a
+    guess derived purely from the redaction box's own height — a table
+    page routinely mixes a larger header font with small body-row text,
+    and a page-wide/height-only guess flattens that difference away.
+
+    Falls back to ``fallback_font_name`` and no preferred size (letting
+    ``_fit_font_size`` derive one from the box height as before) when
+    nothing overlaps — e.g. a table cell that was blank in the source.
+    """
+    best_area = 0.0
+    best_span: dict | None = None
+    for block in page_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if not span.get("text", "").strip():
+                    continue
+                area = _overlap_area(fitz.Rect(span["bbox"]), rect)
+                if area > best_area:
+                    best_area = area
+                    best_span = span
+    if best_span is None:
+        return fallback_font_name, None
+    family = _font_family_from_name(best_span.get("font", "").lower())
+    size = best_span.get("size")
+    return family, float(size) if size else None
+
+
 def _fit_font_size(
     text: str,
     box_w: float,
     box_h: float,
     max_size_cap: int | None = None,
     font_name: str = _FALLBACK_FONT_NAME,
+    preferred_size: float | None = None,
 ) -> int | None:
     """Largest font size (>= ``_MIN_FONT_SIZE``) whose rendered width of
-    ``text`` fits ``box_w``, starting from a box-height-driven guess —
-    the same idea as the raster renderer's ``_font_for_box``. ``None``
-    when the box is too small for any size to fit.
+    ``text`` fits ``box_w``, starting from ``preferred_size`` (the
+    original span's own point size — see ``_region_font_and_size``)
+    when given, else the same box-height-driven guess the raster
+    renderer's ``_font_for_box`` uses. ``None`` when the box is too
+    small for any size to fit.
 
-    ``max_size_cap``, when given, clamps the starting size — see
-    ``_page_font_size_cap``.
+    ``max_size_cap``, when given, still clamps the starting size (see
+    ``_page_font_size_cap``) even when ``preferred_size`` is used — an
+    overlapping span picked by bbox overlap alone is an imperfect
+    match, so a stray large span (e.g. a heading that only clips the
+    edge of a body-row redaction box) can't blow past what every other
+    redaction on the page renders at.
     """
     if box_h < _MIN_BOX_HEIGHT or box_w <= 2:
         return None
-    size = max(1, int(0.7 * box_h))
+    if preferred_size is not None and preferred_size >= 1:
+        size = int(round(preferred_size))
+    else:
+        size = max(1, int(0.7 * box_h))
     if max_size_cap is not None:
         size = min(size, max_size_cap)
-    # A short box yields a height-driven guess below _MIN_FONT_SIZE even
-    # though it may still be plenty *wide* enough for the smallest
-    # readable size — always attempt _MIN_FONT_SIZE rather than bailing
-    # out purely on a short box (real bank-statement rows are routinely
-    # this short). max_size_cap is always >= _MIN_FONT_SIZE (see
-    # _page_font_size_cap), so this never exceeds the page-wide cap.
+    # A short box/small preferred size yields a guess below
+    # _MIN_FONT_SIZE even though it may still be plenty *wide* enough
+    # for the smallest readable size — always attempt _MIN_FONT_SIZE
+    # rather than bailing out purely on that (real bank-statement rows
+    # are routinely this short). max_size_cap is always >=
+    # _MIN_FONT_SIZE (see _page_font_size_cap), so this never exceeds
+    # the page-wide cap.
     size = max(size, _MIN_FONT_SIZE)
     max_width = box_w - 2
     while size >= _MIN_FONT_SIZE:
@@ -222,6 +294,7 @@ def _insert_fitted_text(
     mock_value: str,
     max_size_cap: int | None = None,
     font_name: str = _FALLBACK_FONT_NAME,
+    preferred_size: float | None = None,
 ) -> None:
     """Draw ``mock_value`` centered in ``rect`` as real vector text, or
     skip silently if it can't be shrunk to fit — matching the raster
@@ -230,7 +303,7 @@ def _insert_fitted_text(
     mock = (mock_value or "").strip()
     if not mock:
         return
-    size = _fit_font_size(mock, rect.width, rect.height, max_size_cap, font_name)
+    size = _fit_font_size(mock, rect.width, rect.height, max_size_cap, font_name, preferred_size)
     if size is None:
         return
     text_width = fitz.get_text_length(mock, fontname=font_name, fontsize=size)
@@ -252,19 +325,28 @@ def redact_text_regions(page: "fitz.Page", regions: Sequence[PaintedRegion], dpi
     text_regions = [r for r in regions if not _is_brand_region(r)]
     if not text_regions:
         return
-    font_name = _detect_page_font_name(page)
+    page_dict = _get_page_text_dict(page)
+    page_font_name = _detect_page_font_name(page_dict)
     font_cap = _page_font_size_cap(regions, dpi)
     rects = [_bbox_to_rect(r.padded_bbox, dpi) for r in text_regions]
+    region_fonts = [_region_font_and_size(page_dict, rect, page_font_name) for rect in rects]
     for rect in rects:
         if rect.width <= 0 or rect.height <= 0:
             continue
         page.add_redact_annot(rect, fill=_REDACT_FILL)
     _apply_redactions_safely(page)
-    for region, rect in zip(text_regions, rects, strict=True):
+    for region, rect, (font_name, preferred_size) in zip(
+        text_regions, rects, region_fonts, strict=True
+    ):
         if rect.width <= 0 or rect.height <= 0:
             continue
         _insert_fitted_text(
-            page, rect, getattr(region, "mock_value", "") or "", font_cap, font_name
+            page,
+            rect,
+            getattr(region, "mock_value", "") or "",
+            font_cap,
+            font_name,
+            preferred_size,
         )
 
 
@@ -282,17 +364,26 @@ def redact_image_regions(page: "fitz.Page", regions: Sequence[PaintedRegion], dp
     brand_regions = [r for r in regions if _is_brand_region(r)]
     if not brand_regions:
         return
-    font_name = _detect_page_font_name(page)
+    page_dict = _get_page_text_dict(page)
+    page_font_name = _detect_page_font_name(page_dict)
     font_cap = _page_font_size_cap(regions, dpi)
     rects = [_bbox_to_rect(r.padded_bbox, dpi) for r in brand_regions]
+    region_fonts = [_region_font_and_size(page_dict, rect, page_font_name) for rect in rects]
     for rect in rects:
         if rect.width <= 0 or rect.height <= 0:
             continue
         page.add_redact_annot(rect, fill=_REDACT_FILL)
     _apply_redactions_safely(page)
-    for region, rect in zip(brand_regions, rects, strict=True):
+    for region, rect, (font_name, preferred_size) in zip(
+        brand_regions, rects, region_fonts, strict=True
+    ):
         if rect.width <= 0 or rect.height <= 0:
             continue
         _insert_fitted_text(
-            page, rect, getattr(region, "mock_value", "") or "", font_cap, font_name
+            page,
+            rect,
+            getattr(region, "mock_value", "") or "",
+            font_cap,
+            font_name,
+            preferred_size,
         )
