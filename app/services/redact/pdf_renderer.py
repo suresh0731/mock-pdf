@@ -356,7 +356,20 @@ def render_redacted_pdf(
                 _append_raster_page(doc, page_input.image, page_regions, fmt, jpeg_quality)
 
         doc.set_metadata({"title": _sanitize_filename(filename)})
-        pdf_bytes = doc.tobytes()
+        # A vector page's PDF_REDACT_IMAGE_PIXELS phase (see
+        # pdf_native_redactor.py) replaces any image touched by a redaction
+        # rectangle with a new, *uncompressed* PNG-format stream, and
+        # leaves the original pre-redaction image/content-stream objects
+        # as unreferenced "ghosts" in the file — both well-documented
+        # PyMuPDF behaviors (github.com/pymupdf/PyMuPDF/discussions/2458).
+        # Without garbage collection + deflate here, a mostly-text digital
+        # page carrying even one small logo/letterhead image can bloat the
+        # output to many times the source PDF's size. garbage=4 drops
+        # those orphaned objects (and de-duplicates identical ones);
+        # deflate=True flate-compresses the new uncompressed streams. Only
+        # meaningfully shrinks documents with at least one vector page —
+        # a harmless no-op extra pass otherwise.
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True) if vector_page_count else doc.tobytes()
     finally:
         doc.close()
 

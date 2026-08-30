@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # mock_dictionary_path above is the separate, git-ignored, machine-local
     # runtime cache (hit_count/timestamps/auto-learned entries).
     mock_seed_path: Path | None = Path("data/mock-dictionary/mappings.seed.json")
+    # Per-upload trace file for CSV mapping-import rejections (see
+    # app/services/pii/mapping_csv.py's save_skipped_rows_report). Only
+    # written when an upload actually has skipped rows — a clean upload
+    # leaves this directory untouched.
+    mock_import_report_dir: Path = Path("data/mock-dictionary/import-reports")
     fuzzy_match_threshold: float = 0.85
     strip_gridlines_enabled: bool = True
     # Corrects small page rotation (crooked scans/off-angle phone photos)

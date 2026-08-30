@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from app.models.mock import MockValidationError, SubstitutionLedger
+from app.utils.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,7 @@ class LedgerStore:
         """
         path = self._ledger_path(ledger.request_id)
         with self._lock:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = Path(str(path) + ".tmp")
-            tmp.write_text(ledger.model_dump_json(indent=2), encoding="utf-8")
-            tmp.replace(path)
+            atomic_write_text(path, ledger.model_dump_json(indent=2))
             logger.info(
                 "ledger_save request_id=%s entry_count=%s",
                 ledger.request_id,

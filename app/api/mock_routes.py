@@ -400,9 +400,10 @@ async def import_mocks(
         store: Injected mock dictionary store.
 
     Returns:
-        ``{inserted, skipped_existing, skipped_invalid}`` row counts.
+        ``{inserted, skipped_existing, skipped_invalid}`` row counts, plus
+        ``rejected_report_path`` when any rows were skipped.
     """
-    from app.services.pii.mapping_csv import import_mappings_csv
+    from app.services.pii.mapping_csv import import_mappings_csv, save_skipped_rows_report
 
     raw = await file.read()
     try:
@@ -415,17 +416,22 @@ async def import_mocks(
         result = import_mappings_csv(store, csv_text)
     except Exception as exc:
         _reraise_store_error(exc)
+    report_path = save_skipped_rows_report(result, get_settings().mock_import_report_dir)
     logger.info(
-        "mock import inserted=%s skipped_existing=%s skipped_invalid=%s",
+        "mock import inserted=%s skipped_existing=%s skipped_invalid=%s report_written=%s",
         result.inserted,
         result.skipped_existing,
         result.skipped_invalid,
+        report_path is not None,
     )
-    return {
+    body: dict[str, Any] = {
         "inserted": result.inserted,
         "skipped_existing": result.skipped_existing,
         "skipped_invalid": result.skipped_invalid,
     }
+    if report_path is not None:
+        body["rejected_report_path"] = str(report_path)
+    return body
 
 
 @router.get("/redact/ledger/{request_id}")

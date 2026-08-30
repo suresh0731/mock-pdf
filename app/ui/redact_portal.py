@@ -602,7 +602,11 @@ def _build_mappings_tab(ui: Any) -> None:
                 ui.download(template_csv().encode("utf-8"), "mock-mappings-template.csv", media_type="text/csv")
 
             async def _import_file(e: Any) -> None:
-                from app.services.pii.mapping_csv import import_mappings_csv
+                from app.config import get_settings
+                from app.services.pii.mapping_csv import (
+                    import_mappings_csv,
+                    save_skipped_rows_report,
+                )
 
                 try:
                     text = await e.file.text("utf-8-sig")
@@ -614,9 +618,17 @@ def _build_mappings_tab(ui: Any) -> None:
                 except Exception:
                     ui.notify("Could not parse that CSV", type="negative")
                     return
-                ui.notify(
+                report_path = save_skipped_rows_report(
+                    result, get_settings().mock_import_report_dir
+                )
+                message = (
                     f"Added {result.inserted} · skipped {result.skipped_existing} existing, "
-                    f"{result.skipped_invalid} invalid",
+                    f"{result.skipped_invalid} invalid"
+                )
+                if report_path is not None:
+                    message += f" · details saved to {report_path.name}"
+                ui.notify(
+                    message,
                     type="positive" if result.inserted else "warning",
                 )
                 _reload_mapping_panel()

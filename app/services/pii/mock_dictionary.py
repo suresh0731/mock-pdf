@@ -29,6 +29,7 @@ from app.services.pii.name_matcher import (
     is_token_subset_collision,
     token_sort_ratio,
 )
+from app.utils.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -619,11 +620,7 @@ class MockDictionaryStore(_InMemoryDictionary):
             version=1,
             entries=list(self._by_id.values()),
         )
-        path = self._snapshot_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = Path(str(path) + ".tmp")
-        tmp.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_text(self._snapshot_path, snapshot.model_dump_json(indent=2))
 
 
 class MockMockDictionary(_InMemoryDictionary):

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.models.mock import MockDictionaryStoreProtocol
@@ -79,3 +81,42 @@ def import_mappings_csv(
     reader = csv.DictReader(io.StringIO(csv_text))
     rows = [dict(row) for row in reader]
     return insert_new_rows(store, rows)
+
+
+def save_skipped_rows_report(result: InsertRowsResult, report_dir: Path) -> Path | None:
+    """Write one upload's rejected/skipped rows to a fresh timestamped CSV.
+
+    Each upload gets its own file (rather than one running log) so a later
+    debugging session can point at exactly which upload produced which
+    rejections, without needing request timing to disambiguate. Mirrors the
+    export/template CSV shape plus a ``reason`` column explaining the skip
+    (``existing_mapping``, ``missing_source_text``, ``missing_mock_value``,
+    ``empty_normalized_source_text``, ``row_not_a_mapping``, or
+    ``store_error:<ExceptionType>``).
+
+    Like ``mock-mappings.csv`` itself, this file carries ``source_text`` —
+    it is a PII store, not a log; never pass its contents to ``logger``.
+
+    Args:
+        result: Outcome of ``import_mappings_csv``/``insert_new_rows``.
+        report_dir: Directory to write the report file into (created if
+            missing).
+
+    Returns:
+        Path to the written report, or None when nothing was skipped (a
+        fully clean upload needs no trace file).
+    """
+    if not result.skipped_rows:
+        return None
+    report_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = report_dir / f"mapping-import-rejected-{timestamp}.csv"
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(("row_number", "source_text", "mock_value", "reason"))
+    for row in result.skipped_rows:
+        writer.writerow(
+            (row.row_number, row.source_text or "", row.mock_value or "", row.reason)
+        )
+    path.write_text(buffer.getvalue(), encoding="utf-8")
+    return path

@@ -11,6 +11,7 @@ from app.services.pii.mapping_csv import (
     TEMPLATE_COLUMNS,
     export_mappings_csv,
     import_mappings_csv,
+    save_skipped_rows_report,
     template_csv,
 )
 from app.services.pii.mock_dictionary import MockDictionaryStore
@@ -138,3 +139,66 @@ def test_import_mappings_csv_ignores_extra_legacy_columns(tmp_path: Path) -> Non
     assert result.inserted == 1
     entry = next(e for e in store.list() if e.source_text == "Acme Corp")
     assert entry.mock_value == "ORG_A"
+
+
+def test_import_mappings_csv_records_reason_for_each_skipped_row(tmp_path: Path) -> None:
+    store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
+    store.upsert("Standard Chartered Custody", "USER_OVERRIDE")
+    csv_text = (
+        "source_text,mock_value\n"
+        "Standard Chartered Custody,SEED_VALUE\n"
+        ",Missing Source\n"
+        "Missing Mock,\n"
+    )
+    result = import_mappings_csv(store, csv_text)
+    reasons = {(row.row_number, row.reason) for row in result.skipped_rows}
+    assert reasons == {
+        (1, "existing_mapping"),
+        (2, "missing_source_text"),
+        (3, "missing_mock_value"),
+    }
+
+
+def test_save_skipped_rows_report_returns_none_when_nothing_skipped(tmp_path: Path) -> None:
+    store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
+    result = import_mappings_csv(store, "source_text,mock_value\nAcme Corp,ORG_A\n")
+    report_dir = tmp_path / "import-reports"
+    assert save_skipped_rows_report(result, report_dir) is None
+    assert not report_dir.exists()
+
+
+def test_save_skipped_rows_report_writes_a_timestamped_file_with_reasons(
+    tmp_path: Path,
+) -> None:
+    store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
+    store.upsert("Standard Chartered Custody", "USER_OVERRIDE")
+    csv_text = "source_text,mock_value\nStandard Chartered Custody,SEED_VALUE\n,Bad Row\n"
+    result = import_mappings_csv(store, csv_text)
+
+    report_dir = tmp_path / "import-reports"
+    report_path = save_skipped_rows_report(result, report_dir)
+
+    assert report_path is not None
+    assert report_path.parent == report_dir
+    assert report_path.name.startswith("mapping-import-rejected-")
+    rows = _rows(report_path.read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    reasons = {row["reason"] for row in rows}
+    assert reasons == {"existing_mapping", "missing_source_text"}
+    assert any(row["source_text"] == "Standard Chartered Custody" for row in rows)
+
+
+def test_save_skipped_rows_report_writes_one_file_per_upload(tmp_path: Path) -> None:
+    """Repeated uploads each leave a separate trace file for debugging."""
+    store = MockDictionaryStore(snapshot_path=tmp_path / "mappings.json")
+    store.upsert("Acme Corp", "USER_OVERRIDE")
+    csv_text = "source_text,mock_value\nAcme Corp,SEED_VALUE\n"
+    report_dir = tmp_path / "import-reports"
+
+    save_skipped_rows_report(import_mappings_csv(store, csv_text), report_dir)
+    save_skipped_rows_report(import_mappings_csv(store, csv_text), report_dir)
+
+    written = list(report_dir.glob("mapping-import-rejected-*.csv"))
+    assert len(written) >= 1
+    for path in written:
+        assert _rows(path.read_text(encoding="utf-8"))
