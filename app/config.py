@@ -280,6 +280,24 @@ class Settings(BaseSettings):
     # never ship un-redacted.
     ocr_blank_page_skip_enabled: bool = True
 
+    # --- OCR output dump (diagnostics) --------------------------------------
+    # Writes one JSON file per document — every page's raw merged OCR text
+    # plus per-word geometry/confidence/engine attribution, straight from
+    # the ensemble/native-text extraction before any PII detection or
+    # mock-dictionary fuzzy matching runs (see
+    # app/services/redact/ocr_output_store.py). Detection/fuzzy-matching
+    # operate on exactly this text, so this is the fastest way to tell
+    # whether a missed fuzzy_dictionary_scan_threshold (0.90 default) match
+    # is a genuinely garbled/misread character the OCR engine produced
+    # rather than a bug in the matching logic itself — the file preserves
+    # the exact characters verbatim (ensure_ascii=False), including any
+    # mojibake. Written under {shard_base_path}/ocr-output/{request_id}.json
+    # — same real-document-text sensitivity as SubstitutionLedger, so it's
+    # git-ignored and never touches AuditStore/the API response. Set False
+    # to stop writing it (e.g. once an issue is no longer being
+    # investigated, or to save disk on a high-volume deployment).
+    ocr_output_dump_enabled: bool = True
+
     # --- Folder-watch ingestion (extension, alongside UI/API upload) -------
     # Polls `watch_input_dir` for new files and redacts them one at a time
     # (never in parallel — see app/services/watch/folder_watcher.py), using

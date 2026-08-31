@@ -126,6 +126,33 @@ default `"json"`) so every field above is directly diffable/greppable
 for a human-readable line instead. Level is `Settings.log_level` (default
 `"INFO"`; set `LOG_LEVEL=DEBUG` to also see the per-redaction padding line).
 
+## Debugging: per-document OCR output dump
+
+Every fuzzy-match decision (`Settings.fuzzy_dictionary_scan_threshold`, `fuzzy_match_threshold`, mock-dictionary resolution, ...) runs against exactly what OCR/native-text extraction produced — so when a value that should match doesn't, the fastest first check is whether OCR itself read a special/garbled character (a smart quote, a dropped diacritic, a digit misread as a letter, ...) rather than assuming the matching logic is at fault.
+
+By default (`Settings.ocr_output_dump_enabled=true`), every redaction request writes one JSON file per document to `data/ocr-output/{request_id}.json` (git-ignored — it's real document text, same sensitivity as the substitution ledger, and it's never exposed via the audit response or UI). Each file has one entry per page:
+
+```json
+{
+  "request_id": "req_...",
+  "filename": "statement.pdf",
+  "page_count": 2,
+  "pages": [
+    {
+      "page_index": 0,
+      "page_kind": "scanned",
+      "word_count": 214,
+      "merged_text": "... exact OCR/native text for this page ...",
+      "words": [
+        {"text": "Jane", "x": 120, "y": 88, "w": 40, "h": 14, "confidence": 0.97, "engine_agreement": 1.0, "engines": ["rapidocr"], "char_start": 0, "char_end": 4}
+      ]
+    }
+  ]
+}
+```
+
+`ensure_ascii=False` keeps the file human-readable while still JSON-escaping any control/non-printable character, so a genuinely corrupt OCR read (mojibake, a stray control byte) shows up as an explicit `\uXXXX` escape instead of an invisible/garbled terminal glyph. Set `OCR_OUTPUT_DUMP_ENABLED=false` (`.env.local`) to stop writing it once an issue is no longer being investigated, or on a high-volume deployment to save disk.
+
 ## Debugging: visualizing pipeline stages
 
 To find exactly where a redaction goes wrong (a table header swallowed by a redaction box, a wrong mock value, PII that never got detected, an over/under-padded box, ...), `scripts/visualize_pipeline_stages.py` re-derives every intermediate artifact `RedactPipeline` produces for **one page** and writes each stage as its own numbered, annotated PNG instead of only the final redacted output. It calls the exact same functions `RedactPipeline` calls internally (`extract_field_candidates`, `_collect_redactions`, ...) — it never changes production behavior, only observes it.

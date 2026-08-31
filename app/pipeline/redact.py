@@ -50,6 +50,7 @@ from app.services.pii.redaction_scorer import score_redaction
 from app.services.pii.signature_zones import detect_signature_zones
 from app.services.preprocess.canonical import CanonicalPage, canonicalize_page
 from app.services.redact.audit_store import AuditStore
+from app.services.redact.ocr_output_store import OcrOutputStore
 from app.services.redact.pdf_renderer import PageRenderInput, render_redacted_pdf
 from app.services.redact.session_store import RedactSession, session_store
 from app.services.structure.docling_adapter import DocBlock, extract_structure
@@ -804,13 +805,15 @@ class RedactPipeline:
         mock_store: MockDictionaryStoreProtocol | None = None,
         ledger_store: LedgerStoreProtocol | None = None,
         audit_store: AuditStore | None = None,
+        ocr_output_store: OcrOutputStore | None = None,
     ) -> None:
-        from app.api.mock_routes import get_ledger_store, get_mock_store
+        from app.api.mock_routes import get_ledger_store, get_mock_store, get_ocr_output_store
 
         self.settings = settings or get_settings()
         self.mock_store = mock_store or get_mock_store()
         self.ledger_store = ledger_store or get_ledger_store()
         self.audit_store = audit_store or AuditStore()
+        self.ocr_output_store = ocr_output_store or get_ocr_output_store()
 
     async def run(
         self,
@@ -824,6 +827,7 @@ class RedactPipeline:
         session_id = uuid.uuid4().hex
 
         page_states = await self._build_page_states(file_bytes, filename, opts)
+        self._dump_ocr_output(request_id, filename, page_states)
         all_redactions, page_audits, ledger_rows, brand_zones = self._collect_redactions(
             page_states, opts, region_start=0
         )
@@ -884,6 +888,29 @@ class RedactPipeline:
         session.custom_terms = [t.search_value for t in opts.custom_redactions]
         session_store.put(session)
         return pdf_bytes, audit, session
+
+    def _dump_ocr_output(
+        self,
+        request_id: str,
+        filename: str,
+        page_states: list[PageProcessState],
+    ) -> None:
+        """Best-effort diagnostic dump (Settings.ocr_output_dump_enabled) —
+        see app/services/redact/ocr_output_store.py. Only written on a
+        fresh OCR run (``run()``, not ``regenerate()``, which reuses
+        already-cached page_states with nothing new to dump). Never lets a
+        write failure (e.g. a disk-full machine) fail the actual redaction
+        request — this file only exists to help diagnose OCR/fuzzy-match
+        issues after the fact.
+        """
+        if not self.settings.ocr_output_dump_enabled:
+            return
+        try:
+            self.ocr_output_store.save(request_id, filename, page_states)
+        except Exception:
+            logger.warning(
+                "ocr_output_dump failed for request_id=%s", request_id, exc_info=True
+            )
 
     def _persist_outputs(
         self,

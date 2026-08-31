@@ -136,6 +136,14 @@ def get_ledger_store() -> LedgerStoreProtocol:
     return LedgerStore(base_dir=get_settings().shard_base_path / "shards")
 
 
+@lru_cache
+def get_ocr_output_store() -> "OcrOutputStore":
+    """Process-wide OCR output dump store under ``{shard_base}/ocr-output``."""
+    from app.services.redact.ocr_output_store import OcrOutputStore
+
+    return OcrOutputStore(base_dir=get_settings().shard_base_path / "ocr-output")
+
+
 def require_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     auth: AuthSettings = Depends(get_auth_settings),

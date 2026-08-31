@@ -4,6 +4,10 @@ __pycache__/
 .env.local
 data/shards/
 data/audit/
+# Per-document OCR output dump (Settings.ocr_output_dump_enabled) — real
+# document text, machine-local diagnostic artifact only. See
+# app/services/redact/ocr_output_store.py.
+data/ocr-output/
 # Local runtime-learned mock-dictionary cache (hit_count/timestamps/auto
 # entries) — machine-local scratch state, not source of truth. The curated,
 # git-tracked seed lives in mappings.seed.json and is explicitly re-included

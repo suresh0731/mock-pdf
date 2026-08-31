@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     (settings.shard_base_path / "audit" / "requests").mkdir(parents=True, exist_ok=True)
     settings.mock_dictionary_path.parent.mkdir(parents=True, exist_ok=True)
     (settings.shard_base_path / "shards").mkdir(parents=True, exist_ok=True)
+    (settings.shard_base_path / "ocr-output").mkdir(parents=True, exist_ok=True)
 
     # Opt-in folder-watch ingestion (WATCH_ENABLED=true) — additive to the
     # UI/API upload, off by default so it never changes existing behavior.
