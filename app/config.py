@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     # generic image redaction zone — filters bullet icons/checkbox glyphs
     # Docling may still classify as "picture".
     image_zone_min_area_pct: float = 0.0015
+    # Ink-gap signature redaction: the blank vertical space immediately
+    # above/below an already-detected signatory name/org row in the
+    # bottom-of-page signature block (see
+    # app/services/pii/signature_zones.py) — pure OCR-word geometry, no
+    # Docling/OpenCV/ML model, since Docling's picture classifier only
+    # inconsistently recognizes handwritten ink as a "picture" block.
+    # Global default toggle; RedactOptions.patch_signatures overrides
+    # per-request.
+    patch_signatures_enabled: bool = True
     blur_threshold_good: float = 100.0
     blur_threshold_mild: float = 50.0
     padding_px_good: int = 4
@@ -239,7 +248,15 @@ class Settings(BaseSettings):
     # needed. Non-PDF input (jpg/png/tiff) and the pdf2image fallback path
     # (used only if PyMuPDF itself fails to render the file) have no native
     # text layer to read and always fall through to OCR, identical to
-    # pre-bypass behavior.
+    # pre-bypass behavior. Set False to force *every* page through the
+    # scanned/OCR path unconditionally — classify_and_extract is never even
+    # called (no per-page "digital" classification happens at all), and the
+    # ensemble_ocr-failure fallback to native text further below also stops
+    # falling back to it. Useful for a deployment that wants OCR-only
+    # behavior end to end (e.g. to keep every output page on the raster
+    # redaction path in app/services/redact/pdf_renderer.py rather than the
+    # vector-native one, or to sidestep a native text layer that's known to
+    # be unreliable for a given document source).
     native_text_bypass_enabled: bool = True
     # Minimum extractable word count for a page to qualify as "digital".
     native_text_min_words: int = 20

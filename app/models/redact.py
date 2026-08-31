@@ -21,6 +21,7 @@ class RedactOptions(BaseModel):
     custom_redactions: list[CustomRedactTerm] = Field(default_factory=list)
     patch_footer: bool = True
     patch_images: bool = True
+    patch_signatures: bool = True
     # Whitelist of OCR engines to run ("tesseract"/"easyocr"/"rapidocr").
     # None/empty runs every available engine (auto/ensemble) — the default.
     ocr_engines: list[str] | None = None

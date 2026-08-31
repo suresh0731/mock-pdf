@@ -47,6 +47,7 @@ from app.services.pii.field_extractor import extract_field_candidates
 from app.services.pii.mock_dictionary import normalize_source
 from app.services.pii.name_matcher import token_sort_ratio
 from app.services.pii.redaction_scorer import score_redaction
+from app.services.pii.signature_zones import detect_signature_zones
 from app.services.preprocess.canonical import CanonicalPage, canonicalize_page
 from app.services.redact.audit_store import AuditStore
 from app.services.redact.pdf_renderer import PageRenderInput, render_redacted_pdf
@@ -738,6 +739,7 @@ def _line_wrap_clusters(
 _BRAND_ZONE_ENTITY_TYPES = {
     "footer": "BRAND_FOOTER",
     "picture": "BRAND_IMAGE",
+    "signature": "SIGNATURE",
 }
 
 
@@ -1528,6 +1530,14 @@ class RedactPipeline:
                 existing_zones=zones,
                 enabled=opts.patch_images and self.settings.patch_images_enabled,
                 min_area_pct=self.settings.image_zone_min_area_pct,
+            )
+            zones = zones + detect_signature_zones(
+                ensemble_words,
+                page_w=original.width,
+                page_h=original.height,
+                page=canonical.page_index,
+                existing_zones=zones,
+                enabled=opts.patch_signatures and self.settings.patch_signatures_enabled,
             )
             text_boxes = [r.padded_bbox for r in page_redactions]
             min_picture_area = (

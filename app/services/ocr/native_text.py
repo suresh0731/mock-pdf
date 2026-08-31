@@ -98,18 +98,53 @@ def classify_page(
 
 
 def _extract_word_dicts(fitz_page: object, scale: float) -> list[dict]:
-    word_dicts: list[dict] = []
+    raw_entries: list[tuple] = []
     for entry in fitz_page.get_text("words"):
         if len(entry) < 5:
             continue
+        raw_entries.append(entry)
+
+    # PyMuPDF reports each word with its own tight glyph bbox.  Words that
+    # visually sit on the same PDF line can therefore have slightly different
+    # y0/y1 values (different fonts, baselines, or content-stream objects).  If
+    # we keep those per-word bboxes, downstream row grouping (which clusters
+    # by word-bbox center) can split one logical line into several rows, so a
+    # table cell like "Standard Chartered Bank" becomes "Standard Chartered" +
+    # "Bank".  That fragment then fails the fuzzy dictionary match and leaves
+    # the trailing word unredacted.  Instead, derive a single line bbox for
+    # every (block_no, line_no) pair and give every word on that line the same
+    # y/h, while keeping x/w per-word.  The x precision is preserved for column
+    # zone assignment and redaction box width; the shared y/h prevents line
+    # fragmentation without changing the text or reading order.
+    line_bboxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+    for entry in raw_entries:
+        x0, y0, x1, y1 = entry[0], entry[1], entry[2], entry[3]
+        block_no = int(entry[5]) if len(entry) > 5 else 0
+        line_no = int(entry[6]) if len(entry) > 6 else 0
+        key = (block_no, line_no)
+        if key not in line_bboxes:
+            line_bboxes[key] = (x0, y0, x1, y1)
+        else:
+            bx0, by0, bx1, by1 = line_bboxes[key]
+            line_bboxes[key] = (min(bx0, x0), min(by0, y0), max(bx1, x1), max(by1, y1))
+
+    word_dicts: list[dict] = []
+    for entry in raw_entries:
         x0, y0, x1, y1, text = entry[0], entry[1], entry[2], entry[3], entry[4]
         stripped = (text or "").strip()
         if not stripped:
             continue
+        block_no = int(entry[5]) if len(entry) > 5 else 0
+        line_no = int(entry[6]) if len(entry) > 6 else 0
+        line_bbox = line_bboxes.get((block_no, line_no))
+        if line_bbox is not None:
+            ly0, ly1 = line_bbox[1], line_bbox[3]
+        else:
+            ly0, ly1 = y0, y1
         x = x0 * scale
-        y = y0 * scale
+        y = ly0 * scale
         w = (x1 - x0) * scale
-        h = (y1 - y0) * scale
+        h = (ly1 - ly0) * scale
         if w <= 0 or h <= 0:
             continue
         word_dicts.append(

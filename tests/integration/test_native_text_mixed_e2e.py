@@ -121,3 +121,29 @@ def test_mixed_document_bypasses_ocr_on_digital_page_only(tmp_path, monkeypatch)
     person_region = next(r for r in audit.redactions if r.page == 1)
     assert org_region.mock_value == store.resolve(ORG).mock_value
     assert person_region.mock_value == store.resolve(PERSON).mock_value
+
+
+def test_native_text_bypass_disabled_forces_scanned_on_every_page(tmp_path, monkeypatch):
+    """``native_text_bypass_enabled=False`` must force the same
+    would-be-digital page (real fitz text layer, above both native-text
+    thresholds) through OCR instead — no page is ever classified
+    "digital", regardless of how much native text it carries.
+    """
+    pages = [
+        RenderedPage(image=_blank_image(), fitz_page=FakeFitzPage()),
+        RenderedPage(image=_blank_image(), fitz_page=None),
+    ]
+    monkeypatch.setattr("app.pipeline.redact.load_pages", lambda *a, **k: pages)
+    ocr_mock = AsyncMock(side_effect=_fake_ocr)
+    monkeypatch.setattr("app.pipeline.redact.ensemble_ocr_page", ocr_mock)
+    monkeypatch.setattr("app.pipeline.redact.extract_structure", lambda *a, **k: [])
+
+    pipeline, _store = _pipeline(tmp_path, monkeypatch)
+    pipeline.settings.native_text_bypass_enabled = False
+
+    _, audit, _ = asyncio.run(pipeline.run(b"%PDF-1.4", "doc.pdf", RedactOptions()))
+
+    assert [p.page_kind for p in audit.pages] == ["scanned", "scanned"]
+    # OCR ran for both pages now, including the one with a real native
+    # text layer that would otherwise have bypassed it.
+    assert ocr_mock.call_count == 2

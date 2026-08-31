@@ -28,13 +28,15 @@ class BrandZone:
     """A heuristic brand chrome region on an original page.
 
     Attributes:
-        zone: Zone kind, ``footer`` or ``picture``.
+        zone: Zone kind, ``footer``, ``picture``, or ``signature`` (see
+            ``app.services.pii.signature_zones.detect_signature_zones``).
         page: Zero-based page index.
         bbox: Box in original-page pixels.
-        label: Painted cover label, ``FOOTER`` or ``IMAGE``.
+        label: Painted cover label, ``FOOTER``, ``IMAGE``, or
+            ``SIGNATURE``.
     """
 
-    zone: Literal["footer", "picture"]
+    zone: Literal["footer", "picture", "signature"]
     page: int
     bbox: BBox
     label: str

@@ -31,12 +31,12 @@ def _digital_page() -> FakePage:
     for row in range(6):
         x = 10.0
         for col in range(5):
-            words.append(("word%d_%d" % (row, col), x, y, x + 18, y + 10))
+            words.append(("word%d_%d" % (row, col), x, y, x + 18, y + 10, 0, row, 0))
             x += 20.0
         blocks.append((10.0, y, x, y + 10, "line", row, 0))
         y += 14.0
     # get_text("words") returns (x0,y0,x1,y1,text,block_no,line_no,word_no)
-    word_tuples = [(x0, y0, x1, y1, text, 0, 0, 0) for text, x0, y0, x1, y1 in words]
+    word_tuples = [(x0, y0, x1, y1, text, block_no, line_no, 0) for text, x0, y0, x1, y1, block_no, line_no, _ in words]
     return FakePage(width=200.0, height=120.0, words=word_tuples, blocks=blocks)
 
 
@@ -115,6 +115,42 @@ def test_extract_native_words_skips_blank_tokens():
     merged, words = extract_native_words(page, dpi=72, page_index=0)
     assert merged == ""
     assert words == []
+
+
+def test_extract_native_words_uses_shared_line_bbox_for_row_grouping():
+    """Words on the same PDF line but with slightly different glyph bboxes
+    must share the same y/h so downstream row grouping never fragments a
+    single table value like 'Standard Chartered Bank' into 'Standard
+    Chartered' + 'Bank'.
+    """
+    page = FakePage(
+        width=200.0,
+        height=100.0,
+        words=[
+            # Same line_no: two words have different y0/y1 (e.g. different
+            # baseline/bold font in the PDF content stream).
+            (10.0, 20.0, 50.0, 24.0, "Standard", 0, 0, 0),
+            (55.0, 20.0, 95.0, 24.0, "Chartered", 0, 0, 1),
+            (100.0, 21.5, 130.0, 25.5, "Bank", 0, 0, 2),  # slightly lower baseline
+            # Next line, different line_no.
+            (10.0, 40.0, 40.0, 44.0, "Other", 0, 1, 0),
+        ],
+        blocks=[],
+    )
+    merged, words = extract_native_words(page, dpi=72, page_index=0)
+    assert merged == "Standard Chartered Bank Other"
+    assert len(words) == 4
+    line0 = words[:3]
+    # All three words on line 0 share the same y/h (the line bbox union).
+    assert {w.bbox.y for w in line0} == {20}
+    assert {w.bbox.h for w in line0} == {6}  # 25.5 - 20.0 = 5.5 -> rounded to 6
+    # x/w are still per-word.
+    assert [w.bbox.x for w in line0] == [10, 55, 100]
+    assert [w.bbox.w for w in line0] == [40, 40, 30]
+    # The next line has a distinct y/h.
+    other = words[3]
+    assert other.bbox.y == 40
+    assert other.bbox.h == 4
 
 
 def test_classify_and_extract_returns_scanned_for_none_page():

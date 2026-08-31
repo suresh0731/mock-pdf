@@ -381,6 +381,7 @@ def _build_redact_tab(ui: Any) -> None:
                     with ui.row().classes("w-full gap-4"):
                         patch_footer = ui.checkbox("Cover footer", value=True)
                         patch_images = ui.checkbox("Cover images/graphics", value=True)
+                        patch_signatures = ui.checkbox("Cover signatures", value=True)
                     ocr_engine_select = ui.select(
                         _ocr_engine_options(),
                         label="OCR engine",
@@ -447,6 +448,7 @@ def _build_redact_tab(ui: Any) -> None:
                         custom_redactions=parse_custom_terms(terms_text),
                         patch_footer=bool(patch_footer.value),
                         patch_images=bool(patch_images.value),
+                        patch_signatures=bool(patch_signatures.value),
                         ocr_engines=(
                             [selected_engine] if selected_engine and selected_engine != "auto" else None
                         ),

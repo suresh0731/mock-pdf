@@ -458,6 +458,54 @@ def test_table_column_docling_cell_stitching_noop_without_blocks():
         assert bank_texts == {"Standard Chartered Custody"}
 
 
+# Docling/img2table sometimes over-segment a logical multi-line cell into one
+# sub-cell per text line (e.g. the bank-name cell rendered as "Standard"
+# + "Chartered" + "Bank" gets reported as three stacked cells).  Without
+# merging those sub-cells first, _stitch_docling_cells sees three distinct
+# cells and cannot glue the fragments back together.
+_STITCH_CREDIT_BANK_SUBCELLS: list[DocBlock] = [
+    DocBlock(
+        block_id="dl-sub-0",
+        block_type="cell",
+        bbox=BBox(x=1140, y=70, w=250, h=35),  # "Standard" line
+        text="Standard",
+        table_row=2,
+    ),
+    DocBlock(
+        block_id="dl-sub-1",
+        block_type="cell",
+        bbox=BBox(x=1140, y=110, w=250, h=35),  # "Chartered" line
+        text="Chartered",
+        table_row=3,
+    ),
+    DocBlock(
+        block_id="dl-sub-2",
+        block_type="cell",
+        bbox=BBox(x=1140, y=150, w=250, h=35),  # "Custody" line
+        text="Custody",
+        table_row=4,
+    ),
+]
+
+
+def test_table_column_oversegmented_cells_are_merged_before_stitching():
+    """When Docling reports a wrapped logical cell as multiple stacked sub-cells,
+    _merge_oversegmented_cells must reunite them before the stitcher runs, so the
+    final candidate still carries the full bank-name text instead of fragments.
+    """
+    merged, words = _make_words(_STITCH_HEADER + _STITCH_DATA)
+    candidates = extract_field_candidates(merged, words, blocks=_STITCH_CREDIT_BANK_SUBCELLS)
+
+    banks = [c for c in candidates if c.field_role == "bank_name"]
+    assert len(banks) == 2
+    assert all(_span_text(merged, b) == "Standard Chartered Custody" for b in banks)
+
+    debit = next(c for c in candidates if c.field_role == "debit_account_name")
+    assert debit.account_number == "30608778491"
+    credit = next(c for c in candidates if c.field_role == "credit_account_name")
+    assert credit.account_number == "30608788780"
+
+
 def test_column_band_stitch_noop_when_no_header_detected():
     _, words = _make_words([("Wahyu", 0, 0, 50, 20), ("Wijaya", 55, 0, 60, 20)])
     rows = _group_rows(words)
@@ -623,6 +671,41 @@ def test_signature_block_skips_hormat_kami_closer():
     merged, words = _make_words(specs)
     candidates = extract_field_candidates(merged, words)
     assert candidates == []
+
+
+def test_signature_block_two_side_by_side_signatories_both_detected():
+    """Two independent signatories printed on the same visual baseline
+    (a common "Authorized by" layout) must not be merged into one
+    over-long row that then fails every word-count guard and drops both
+    — a real repii/ sample regression this guards against."""
+    specs: list[WordSpec] = [
+        ("Invoice", 0, 0, 60, 20),
+        ("Wahyu", 0, 900, 50, 20),
+        ("Wijaya", 55, 900, 60, 20),
+        ("Mira", 400, 900, 45, 20),
+        ("Octora", 450, 900, 60, 20),
+        ("S", 515, 900, 15, 20),
+    ]
+    merged, words = _make_words(specs)
+    candidates = extract_field_candidates(merged, words)
+
+    signatures = [c for c in candidates if c.field_role == "signatory_person"]
+    assert {_span_text(merged, c) for c in signatures} == {"Wahyu Wijaya", "Mira Octora S"}
+
+
+def test_signature_block_close_words_within_a_name_stay_one_row():
+    """Ordinary inter-word spacing within a single name/title must not be
+    mistaken for a column gap between two different signatories."""
+    specs: list[WordSpec] = [
+        ("Invoice", 0, 0, 60, 20),
+        ("Wahyu", 0, 900, 50, 20),
+        ("Wijaya", 62, 900, 60, 20),
+    ]
+    merged, words = _make_words(specs)
+    candidates = extract_field_candidates(merged, words)
+    signatures = [c for c in candidates if c.field_role == "signatory_person"]
+    assert len(signatures) == 1
+    assert _span_text(merged, signatures[0]) == "Wahyu Wijaya"
 
 
 # --- General guards / dedupe --------------------------------------------

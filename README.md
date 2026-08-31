@@ -55,6 +55,7 @@ To fully vendor: after a clean install's first successful run, zip `%USERPROFILE
 | Auto PII redaction | Field-anchored layout detection + dictionary-scan of curated mappings + deterministic single-engine OCR (documented fallback order) |
 | OCR engine picker | "Auto" uses the deterministic default engine order; pick Tesseract/EasyOCR/RapidOCR to force one — e.g. RapidOCR reads table-heavy statements more reliably than EasyOCR |
 | Custom mock values | One per line; `value=MOCK_LABEL` for audit tags |
+| Cover signatures | Redacts the blank ink gap beside every detected signatory name/org row in the bottom-of-page signature block — see "Signature redaction" below |
 | Regenerate | Re-applies redactions using cached OCR (fast) |
 
 ## Folder-watch ingestion (alongside UI upload)
@@ -138,7 +139,7 @@ To find exactly where a redaction goes wrong (a table header swallowed by a reda
 | 5 | Raw PII candidates (pre mock-resolution) | Every span *before* it's assigned a mock value, colored by detection source (field-anchored / dictionary-scan / dictionary-scan fuzzy / custom-term) |
 | 6 | Accepted redactions (tight box) | What survived mock resolution + dedup, and which mock value it was assigned |
 | 7 | Padding | Tight vs. painted box — a padded box that swallows a neighboring cell/word is visible here |
-| 8 | Brand zones | `FOOTER`/`IMAGE` zones (logos, stamps, signatures) painted on top of the PII redactions |
+| 8 | Brand zones | `FOOTER`/`IMAGE`/`SIGNATURE` zones (logos, stamps, signature ink) painted on top of the PII redactions |
 | 9 | Final output | The **actual** production render path — real vector-native redaction for `digital` pages, paint-then-flatten raster for `scanned` pages |
 
 ### Any PDF — digital (text-layer) *or* scanned/rasterized pages
@@ -165,6 +166,55 @@ Delete the intermediate `.pdf` afterward — it's only a page-selection shim, no
 - `--use-real-dictionary` (default) — seed from the real `mappings.json` (a read-only copy is used; the real file is never written to).
 
 `mappings.json` only ever grows and is never overwritten by a re-import (see "Mock dictionary" above and `app/services/pii/mapping_csv.py`'s docstring), so a `--use-real-dictionary` run and an `--empty-dictionary --mapping-csv your.csv` run of the *same page* can legitimately disagree: if a stale or wrong entry for the same `source_text` already exists locally (e.g. from an earlier auto-learned/uncorrected run), the real-dictionary run keeps it, while the clean run shows what *should* happen per the CSV. When the two runs disagree, the root cause is almost always a stale local dictionary entry, not a bug in `extract_field_candidates`/`_collect_redactions` — check stage 6's mock value against the CSV first before digging into detection logic.
+
+## Signature redaction: ink-gap geometry, not a picture/ML model
+
+Handwritten signatures are redacted as a `SIGNATURE` brand zone
+(`app/services/pii/signature_zones.py`), painted the same way as the
+`FOOTER`/`IMAGE` zones above — but detected completely differently.
+Docling's layout model (the same one behind `IMAGE` zones) is trained on
+printed graphics (logos, photos, charts), so it only inconsistently
+recognizes cursive ink as a `picture` block: verified directly against
+`repii/` samples, where two pen signatures side by side on the same page
+had one boxed by Docling and the other missed outright, purely because
+one stroke happened to be denser/more graphic-shaped than the other.
+
+Rather than add a second, similarly unreliable ML model just for
+signatures, signature detection instead anchors on structure this
+pipeline already computes: the printed signatory name/org row
+`field_extractor.py` finds in the bottom-of-page signature block (e.g.
+`Wahyu Wijaya` under a signature, or `PT Schroder Investment Management
+Indonesia` under an "Acknowledged by" line with no name below it). The
+redaction zone is the blank vertical gap immediately above and/or below
+that anchor — capped to a plausible signature height and bounded by
+whatever real OCR text sits nearest on either side, so it only ever
+covers blank paper, never someone else's printed text. No new
+dependency, no model weights to vendor, fully deterministic from the
+same OCR word geometry already extracted for every other redaction.
+
+One related fix this required: `_group_rows` (the same-line word
+clustering every field-anchored detector shares) clusters purely by
+vertical adjacency with no horizontal-continuity check, so two
+independent signatories printed side by side on one baseline — a common
+"Authorized by" layout — used to land in a single combined row. That
+combined row can exceed the signature-block word-count guards and drop
+*every* signatory on that line at once (confirmed directly: two names
+plus a one-letter suffix hit 5 tokens against a 4-word cap). The
+signature-block detectors now split a row by horizontal gap before
+applying those guards (`_split_row_by_x_gap`) — scoped to just those two
+detectors, since a wide same-row gap elsewhere (table columns,
+label:value rows) is already handled correctly by that mode's own
+column/zone logic.
+
+Toggle: `Settings.patch_signatures_enabled` (global default) /
+`RedactOptions.patch_signatures` (per-request, UI checkbox "Cover
+signatures").
+
+## Native-text bypass: forcing scanned/OCR-only processing
+
+By default, a PDF page carrying a real, selectable text layer (`page_kind=digital`) skips OCR entirely — its text is read straight from the PDF, and it's redacted with the vector-native path (real PyMuPDF redaction annotations, output stays a true PDF page) instead of the raster paint-then-flatten path every scanned page uses. Classification is per-page and automatic; a mixed document (e.g. a copyable cover page followed by scanned pages) needs no flag.
+
+Set `Settings.native_text_bypass_enabled=false` (`NATIVE_TEXT_BYPASS_ENABLED=false` in `.env.local`) to disable that entirely and force **every** page through the scanned/OCR path, regardless of how much real text layer it carries: no page is ever classified `digital`, `app/services/ocr/native_text.py::classify_and_extract` is never called, and the ensemble-OCR-failure fallback to native text (`app/pipeline/redact.py`) is also disabled. Use this when a deployment needs guaranteed OCR-only behavior — e.g. a document source whose embedded text layer is known to be unreliable, or a policy that every output page must go through the raster redaction path rather than the vector-native one.
 
 ## Table structure detection: Docling + img2table
 

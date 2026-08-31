@@ -343,16 +343,19 @@ async def main() -> None:
 
     mock_store = MockDictionaryStore(snapshot_path=mock_snapshot)
     if args.mapping_csv:
-        from app.services.pii.mapping_csv import import_mappings_csv
+        from app.services.pii.mapping_csv import import_mappings_csv, save_skipped_rows_report
 
         csv_path = Path(args.mapping_csv)
         if not csv_path.is_absolute():
             csv_path = REPO_ROOT / csv_path
         result = import_mappings_csv(mock_store, csv_path.read_text(encoding="utf-8"))
+        report_path = save_skipped_rows_report(result, settings.mock_import_report_dir)
         print(
             f"Imported {args.mapping_csv}: {result.inserted} inserted, "
             f"{result.skipped_existing} skipped (existing), {result.skipped_invalid} skipped (invalid)"
         )
+        if report_path is not None:
+            print(f"Skipped-row details: {report_path}")
     ledger_store = LedgerStore(base_dir=tmp_dir / "shards")
     audit_store = AuditStore()
     pipeline = RedactPipeline(
@@ -568,13 +571,13 @@ async def main() -> None:
         _label_tag(draw, b.x, b.y, r.entity_type, (200, 150, 0))
     _draw_legend(
         brand_img,
-        [(f"brand/footer/image zone ({len(brand)})", (255, 200, 0)), ("PII redaction (context)", (180, 180, 180))],
+        [(f"brand/footer/image/signature zone ({len(brand)})", (255, 200, 0)), ("PII redaction (context)", (180, 180, 180))],
     )
     _save(
         _with_title(
             brand_img,
-            f"8. Brand Zone Detection — {len(brand)} footer/picture zones added",
-            f"patch_footer={opts.patch_footer} patch_images={opts.patch_images}",
+            f"8. Brand Zone Detection — {len(brand)} footer/picture/signature zones added",
+            f"patch_footer={opts.patch_footer} patch_images={opts.patch_images} patch_signatures={opts.patch_signatures}",
         ),
         out_dir, 8, "brand zones",
     )

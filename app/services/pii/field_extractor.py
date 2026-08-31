@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from app.models.pii_chunk import BBox
 from app.services.ocr.ensemble_types import EnsembleWord
 from app.services.pii import field_labels
+from app.services.pii.ensemble_mapper import union_bbox
 from app.services.pii.name_matcher import best_fuzzy_match, token_sort_ratio
 from app.services.structure.docling_adapter import DocBlock
 
@@ -356,6 +357,83 @@ def _word_overlap_fraction(word_bbox: BBox, cell_bbox: BBox) -> float:
     inter = (ix2 - ix1) * (iy2 - iy1)
     area = word_bbox.w * word_bbox.h
     return inter / area if area > 0 else 0.0
+
+
+def _merge_oversegmented_cells(cells: list[DocBlock]) -> list[DocBlock]:
+    """Merge vertically-adjacent sub-cells in the same column into logical cells.
+
+    Docling/img2table often report a single multi-line table cell as one
+    sub-cell per text line (observed directly on the user's table: the
+    bank-name cell "Standard Chartered Bank" was split into two cells,
+    and wrapped account-name cells were split similarly).  When those
+    sub-cells are kept separate, the row-stitching logic sees them as
+    distinct cells and cannot reunite the lines into one candidate.  This
+    merges sub-cells that are vertically close and aligned in the same
+    column, while leaving the larger gap between real table rows intact.
+    """
+    if not cells:
+        return []
+    cell_blocks = [c for c in cells if c.block_type == "cell" and c.bbox.w > 0 and c.bbox.h > 0]
+    if not cell_blocks:
+        return []
+
+    # Group cells by column using x-overlap.  Explicit table_column metadata
+    # is intentionally ignored here: it can be None or noisy from img2table, and
+    # for a well-spaced grid the cell x-ranges are the most reliable signal.
+    sorted_by_x = sorted(cell_blocks, key=lambda c: c.bbox.x)
+    columns: list[list[DocBlock]] = []
+    for cell in sorted_by_x:
+        cell_right = cell.bbox.x + cell.bbox.w
+        placed = False
+        for col in columns:
+            col_left = min(c.bbox.x for c in col)
+            col_right = max(c.bbox.x + c.bbox.w for c in col)
+            overlap = min(col_right, cell_right) - max(col_left, cell.bbox.x)
+            if overlap > 0:
+                col.append(cell)
+                placed = True
+                break
+        if not placed:
+            columns.append([cell])
+
+    merged: list[DocBlock] = []
+    for col in columns:
+        col.sort(key=lambda c: c.bbox.y)
+        heights = sorted(c.bbox.h for c in col)
+        median_h = heights[len(heights) // 2] if heights else 1.0
+        max_merge_gap = max(1.0, median_h * 0.5)
+
+        run: list[DocBlock] = [col[0]]
+        for cell in col[1:]:
+            prev = run[-1]
+            gap = cell.bbox.y - (prev.bbox.y + prev.bbox.h)
+            if gap <= max_merge_gap:
+                run.append(cell)
+            else:
+                merged.append(_union_cell_run(run))
+                run = [cell]
+        if run:
+            merged.append(_union_cell_run(run))
+
+    return merged
+
+
+def _union_cell_run(run: list[DocBlock]) -> DocBlock:
+    """Union bbox + concatenated text for a run of vertically-adjacent cells."""
+    x = min(c.bbox.x for c in run)
+    y = min(c.bbox.y for c in run)
+    w = max(c.bbox.x + c.bbox.w for c in run) - x
+    h = max(c.bbox.y + c.bbox.h for c in run) - y
+    texts = [c.text for c in run if c.text]
+    text = " ".join(texts) if texts else (run[0].text or "")
+    return DocBlock(
+        block_id=run[0].block_id,
+        block_type="cell",
+        bbox=BBox(x=x, y=y, w=w, h=h),
+        text=text,
+        table_row=run[0].table_row,
+        table_column=run[0].table_column,
+    )
 
 
 def _assign_cell_ids(words: list[EnsembleWord], cells: list[DocBlock]) -> dict[int, int]:
@@ -1626,6 +1704,50 @@ def _prose_kepada_candidates(ordered_words: list[EnsembleWord]) -> list[FieldCan
 
 # --- Signature-block person-name mode ----------------------------------
 
+# How much wider than ordinary same-line word spacing a horizontal gap
+# must be before it's treated as a separate signatory column rather than
+# a space between two words of the same name/title (see
+# _split_row_by_x_gap).
+_SIGNATURE_COLUMN_GAP_FACTOR = 4.0
+_SIGNATURE_COLUMN_GAP_MIN_PX = 40
+
+
+def _split_row_by_x_gap(row: list[EnsembleWord]) -> list[list[EnsembleWord]]:
+    """Split an already y-clustered row into separate column groups when a
+    horizontal gap between adjacent words is far wider than ordinary
+    word-to-word spacing.
+
+    ``_group_rows`` clusters purely by vertical adjacency, with no
+    horizontal-continuity check at all — two independent signatories
+    printed side by side on the same visual baseline (``Authorized by``
+    blocks routinely lay out 2-3 names across one line) land in a single
+    row alongside each other. Left unsplit, that combined row can exceed
+    ``_SIGNATURE_MAX_WORDS``/``_SIGNATURE_ORG_MAX_WORDS`` (observed
+    directly: two 2-word names plus a 1-word one hit 5 tokens) and drop
+    every signatory on that line from detection at once — worse than
+    merely mislabeling them as one name, this was a real ``repii/``
+    sample turning "Wahyu Wijaya" / "Mira Octora S" into zero candidates.
+
+    Only used by the signature-block detectors below: elsewhere (table
+    columns, label:value rows) a wide same-row gap is already handled by
+    each mode's own column/zone logic, which this must not change.
+    """
+    if len(row) < 2:
+        return [row] if row else []
+    ordered = sorted(row, key=lambda w: w.bbox.x)
+    heights = sorted(w.bbox.h for w in ordered if w.bbox.h > 0)
+    typical_h = heights[len(heights) // 2] if heights else _SIGNATURE_COLUMN_GAP_MIN_PX
+    threshold = max(typical_h * _SIGNATURE_COLUMN_GAP_FACTOR, _SIGNATURE_COLUMN_GAP_MIN_PX)
+    groups: list[list[EnsembleWord]] = [[ordered[0]]]
+    for w in ordered[1:]:
+        prev = groups[-1][-1]
+        gap = w.bbox.x - (prev.bbox.x + prev.bbox.w)
+        if gap > threshold:
+            groups.append([w])
+        else:
+            groups[-1].append(w)
+    return groups
+
 
 def _looks_like_name_token(token: str) -> bool:
     if not token or not token[0].isupper():
@@ -1678,23 +1800,24 @@ def _signature_org_candidates(
         row_top = min(w.bbox.y for w in row)
         if row_top < threshold_y:
             continue
-        if not (_SIGNATURE_ORG_MIN_WORDS <= len(row) <= _SIGNATURE_ORG_MAX_WORDS):
-            continue
-        tokens = _row_tokens(row)
-        if not _is_org_shaped_row(tokens):
-            continue
-        if any(_looks_numeric_or_date(t) for t in tokens):
-            continue
-        candidates.append(
-            FieldCandidate(
-                start=min(w.char_start for w in row),
-                end=max(w.char_end for w in row),
-                entity_type="ORGANIZATION",
-                field_role="counterparty_org",
-                match_confidence=0.7,
-                words=tuple(row),
+        for group in _split_row_by_x_gap(row):
+            if not (_SIGNATURE_ORG_MIN_WORDS <= len(group) <= _SIGNATURE_ORG_MAX_WORDS):
+                continue
+            tokens = _row_tokens(group)
+            if not _is_org_shaped_row(tokens):
+                continue
+            if any(_looks_numeric_or_date(t) for t in tokens):
+                continue
+            candidates.append(
+                FieldCandidate(
+                    start=min(w.char_start for w in group),
+                    end=max(w.char_end for w in group),
+                    entity_type="ORGANIZATION",
+                    field_role="counterparty_org",
+                    match_confidence=0.7,
+                    words=tuple(group),
+                )
             )
-        )
     return candidates
 
 
@@ -1711,30 +1834,71 @@ def _signature_candidates(
         row_top = min(w.bbox.y for w in row)
         if row_top < threshold_y:
             continue
-        if not (_SIGNATURE_MIN_WORDS <= len(row) <= _SIGNATURE_MAX_WORDS):
-            continue
-        tokens = _row_tokens(row)
-        if not all(_looks_like_name_token(t) for t in tokens):
-            continue
-        if _is_signature_closer_row(tokens):
-            continue
-        lowered_tokens = [t.lower() for t in tokens]
-        lowered_row = " ".join(lowered_tokens)
-        if any(stop in lowered_row for stop in field_labels.JOB_TITLE_STOPWORDS):
-            continue
-        if any(t in field_labels.ORG_PREFIX_STOPWORDS for t in lowered_tokens):
-            continue
-        candidates.append(
-            FieldCandidate(
-                start=min(w.char_start for w in row),
-                end=max(w.char_end for w in row),
-                entity_type="PERSON",
-                field_role="signatory_person",
-                match_confidence=0.7,
-                words=tuple(row),
+        for group in _split_row_by_x_gap(row):
+            if not (_SIGNATURE_MIN_WORDS <= len(group) <= _SIGNATURE_MAX_WORDS):
+                continue
+            tokens = _row_tokens(group)
+            if not all(_looks_like_name_token(t) for t in tokens):
+                continue
+            if _is_signature_closer_row(tokens):
+                continue
+            lowered_tokens = [t.lower() for t in tokens]
+            lowered_row = " ".join(lowered_tokens)
+            if any(stop in lowered_row for stop in field_labels.JOB_TITLE_STOPWORDS):
+                continue
+            if any(t in field_labels.ORG_PREFIX_STOPWORDS for t in lowered_tokens):
+                continue
+            candidates.append(
+                FieldCandidate(
+                    start=min(w.char_start for w in group),
+                    end=max(w.char_end for w in group),
+                    entity_type="PERSON",
+                    field_role="signatory_person",
+                    match_confidence=0.7,
+                    words=tuple(group),
+                )
             )
-        )
     return candidates
+
+
+def build_rows(ensemble_words: list[EnsembleWord]) -> list[list[EnsembleWord]]:
+    """Split multi-word OCR boxes and cluster into visual rows.
+
+    Exposed beyond ``extract_field_candidates``'s own internal use so
+    another geometry-only detector that needs this pipeline's row
+    structure — e.g. ``app.services.pii.signature_zones``, which anchors
+    signature-ink zones on the same signature-block rows found below —
+    doesn't reimplement word-splitting/row-clustering with its own tuned
+    constants that could silently drift from these. Docling-cell
+    stitching (``_stitch_docling_cells``) is deliberately not included
+    here: it only matters for table cells, never for the bottom-of-page
+    signature block this is meant for.
+    """
+    if not ensemble_words:
+        return []
+    return _group_rows(_split_multiword_tokens(ensemble_words))
+
+
+def find_signature_anchor_bboxes(
+    rows: list[list[EnsembleWord]], page_height: float
+) -> list[BBox]:
+    """Bounding box of every bottom-of-page signatory name/org row.
+
+    Anchors for ``app.services.pii.signature_zones``'s ink-gap detection:
+    the same rows ``_signature_candidates``/``_signature_org_candidates``
+    already recognize as a signatory's printed name or the company-name
+    line in a signature block, returned as plain geometry rather than
+    ``FieldCandidate``\\s — the caller only needs "where is the printed
+    anchor text" to locate the blank ink gap beside it, not a redaction
+    decision (entity type, mock resolution, ...), which those two
+    functions still own exclusively.
+    """
+    boxes: list[BBox] = []
+    for cand in (*_signature_candidates(rows, page_height), *_signature_org_candidates(rows, page_height)):
+        box = union_bbox(list(cand.words))
+        if box is not None:
+            boxes.append(box)
+    return boxes
 
 
 # --- Public entry point -------------------------------------------------
@@ -1809,6 +1973,11 @@ def extract_field_candidates(
     cell_ids: dict[int, int] = {}
     if blocks:
         cells = [b for b in blocks if b.block_type == "cell"]
+        # Docling/img2table often over-segment a multi-line logical cell into
+        # one sub-cell per line.  Merge those sub-cells before using them as a
+        # row-stitching signal, otherwise the stitcher sees each line as a
+        # different cell and leaves fragments unmerged.
+        cells = _merge_oversegmented_cells(cells)
         cell_ids = _assign_cell_ids(split_words, cells)
         rows = _stitch_docling_cells(rows, cell_ids, cells)
     ordered_words = sorted(split_words, key=lambda w: w.char_start)
