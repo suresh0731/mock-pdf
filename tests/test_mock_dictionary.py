@@ -340,6 +340,115 @@ def test_resolve_fuzzy_threshold_is_configurable(tmp_path: Path) -> None:
     assert lenient_second.mapping_id == lenient_first.mapping_id
 
 
+# --- Generic org-boilerplate stripping (trusted entries only) ------------
+
+
+def test_lookup_trusted_entry_matches_despite_generic_boilerplate_difference(
+    store: MockDictionaryStore,
+) -> None:
+    """A real gap from the client's own mapping table: it never spells
+    ``_SOURCE`` exactly the same way twice — this row adds "Bank" and a
+    hyphen. Raw token_sort_ratio is ~0.88, below the trusted 0.90 bar, so
+    an OCR read of the plain name used to be silently dropped entirely
+    under restrict_to_known_mappings (lookup returned None). Stripping
+    "Bank"/"Custody" from both sides lines them up on "standard
+    chartered" and clears _GENERIC_STRIP_RATIO_FLOOR.
+    """
+    entry = store.upsert("Standard Chartered Bank - Custody", "CUSTODIAN_A")
+
+    found = store.lookup(_SOURCE)
+
+    assert found is not None
+    assert found.mapping_id == entry.mapping_id
+    assert found.mock_value == "CUSTODIAN_A"
+
+
+def test_lookup_trusted_entry_matches_despite_word_order_and_boilerplate(
+    store: MockDictionaryStore,
+) -> None:
+    """The actual OCR reading-order artifact observed on a real scanned
+    table cell: words read back as "Chartered Standard Custody" instead
+    of "Standard Chartered Custody". token_sort_ratio is already
+    order-independent, so this only needs the same boilerplate stripping
+    as the case above to clear the trusted bar.
+    """
+    entry = store.upsert("PT Standard Chartered Bank Custody", "SCBC_PT")
+
+    found = store.lookup("Chartered Standard Custody")
+
+    assert found is not None
+    assert found.mapping_id == entry.mapping_id
+
+
+def test_lookup_rejects_shared_boilerplate_between_different_organizations(
+    store: MockDictionaryStore,
+) -> None:
+    """Regression guard for the failure mode _GENERIC_STRIP_RATIO_FLOOR
+    must not reopen: two *different* real organizations sharing nothing
+    but a generic corporate shell ("PT ... Life Assurance") must stay
+    rejected. "life"/"assurance"/"pt" are deliberately absent from
+    GENERIC_ORG_TOKENS (see its docstring) specifically so this pair's
+    only truly distinguishing words ("mnc" vs. "prudential") still decide
+    the match.
+    """
+    store.upsert("PT MNC Life Assurance", "ORG_MNC")
+
+    found = store.lookup("PT Prudential Life Assurance")
+
+    assert found is None
+
+
+def test_lookup_auto_assigned_entry_gets_no_generic_strip_leniency(
+    store: MockDictionaryStore,
+) -> None:
+    """The boilerplate-stripping fallback is scoped to trusted
+    (assignment_source == "user") entries only — an auto-assigned entry
+    was never human-verified, so it doesn't earn the same leniency.
+    """
+    store.resolve("Bank Custodian Services Standard Chartered Company")  # auto
+
+    found = store.lookup("Standard Chartered")
+
+    assert found is None
+
+
+def test_lookup_trusted_entry_matches_ocr_noise_on_entrys_own_boilerplate(
+    store: MockDictionaryStore,
+) -> None:
+    """The real residual gap found on a scanned table cell: one row's
+    "Custody" OCR'd cleanly, but a different row of the *same* recurring
+    bank name read back as "Cursdy" (a dropped/substituted letter, ratio
+    0.769 to "Custody" — below plain boilerplate stripping's exact-match
+    bar). Since "Standard"/"Chartered" already match this entry with no
+    noise at all, the leftover "Cursdy" is treated as OCR noise on this
+    entry's own "Custody" token specifically, not a global fuzzy guess.
+    """
+    entry = store.upsert("Standard Chartered Bank - Custody", "CUSTODIAN_A")
+
+    found = store.lookup("Chartered Standard Cursdy")
+
+    assert found is not None
+    assert found.mapping_id == entry.mapping_id
+
+
+def test_lookup_rejects_unrelated_organization_despite_boilerplate_noise_bait(
+    store: MockDictionaryStore,
+) -> None:
+    """Regression guard for the failure mode the *global* version of
+    this fuzzy check (rejected during design — see
+    ``strip_generic_org_tokens``'s ``fuzzy_against`` docstring) would
+    have reopened: an unrelated organization must stay rejected even
+    when it has a token that happens to closely resemble one of this
+    entry's boilerplate words, because its *other*, non-boilerplate
+    words don't match at all.
+    """
+    store.upsert("Standard Chartered Bank - Custody", "CUSTODIAN_A")
+
+    found = store.lookup("Fabrindo Custodi")  # "Custodi" ~ "Custody"-ish, wrong org entirely
+
+    assert found is None
+
+
 # --- Prefix-collision ambiguity detection --------------------------------
 
 

@@ -237,6 +237,14 @@ Toggle: `Settings.patch_signatures_enabled` (global default) /
 `RedactOptions.patch_signatures` (per-request, UI checkbox "Cover
 signatures").
 
+On a **digital** (copyable-text) PDF the same toggle also boxes native
+signature objects the text-layer ink-gap cannot see: embedded signature/
+stamp images in the bottom-of-page band, Stamp/Ink annotations, and
+signature-field widgets. The vector redactor then pixel-blanks those
+rects and deletes leftover widget/annot appearance streams so the
+output page does not still *look* signed. A letterhead logo at the top
+of the page is unchanged (that's `Cover images/graphics`).
+
 ## Native-text bypass: forcing scanned/OCR-only processing
 
 By default, a PDF page carrying a real, selectable text layer (`page_kind=digital`) skips OCR entirely — its text is read straight from the PDF, and it's redacted with the vector-native path (real PyMuPDF redaction annotations, output stays a true PDF page) instead of the raster paint-then-flatten path every scanned page uses. Classification is per-page and automatic; a mixed document (e.g. a copyable cover page followed by scanned pages) needs no flag.

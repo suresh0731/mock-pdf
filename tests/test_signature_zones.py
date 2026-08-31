@@ -169,3 +169,83 @@ def test_zones_never_overlap_the_anchor_words_own_box():
     zones = detect_signature_zones(words, page_w=720, page_h=1040, page=0)
     for zone in zones:
         assert zone.bbox.y + zone.bbox.h <= 940 or zone.bbox.y >= 960
+
+
+# --- Native PDF signature graphics (digital pages) --------------------
+
+
+def _page_with_png(rect: tuple[float, float, float, float], *, width: float = 300, height: float = 400):
+    import io
+
+    import fitz
+    from PIL import Image as _Image
+
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    buf = io.BytesIO()
+    _Image.new("RGB", (80, 40), (0, 0, 180)).save(buf, format="PNG")
+    page.insert_image(fitz.Rect(*rect), stream=buf.getvalue())
+    return page
+
+
+def test_native_bottom_image_is_signature_zone_even_without_name_anchor():
+    """A signature/stamp image on a digital page must be boxed even when
+    no signatory name was found (or stamp text would have collapsed the
+    ink-gap). dpi=72 so pixel space == PDF points."""
+    page = _page_with_png((40, 320, 160, 380))
+    zones = detect_signature_zones([], page_w=300, page_h=400, page=0, fitz_page=page, dpi=72)
+    assert len(zones) == 1
+    assert zones[0].zone == "signature"
+    assert zones[0].bbox.y >= 300
+    assert zones[0].bbox.h >= 40
+
+
+def test_native_top_logo_image_is_not_a_signature_zone():
+    page = _page_with_png((40, 20, 160, 60))
+    zones = detect_signature_zones([], page_w=300, page_h=400, page=0, fitz_page=page, dpi=72)
+    assert zones == []
+
+
+def test_native_full_page_image_is_not_a_signature_zone():
+    page = _page_with_png((0, 0, 300, 400), width=300, height=400)
+    zones = detect_signature_zones([], page_w=300, page_h=400, page=0, fitz_page=page, dpi=72)
+    assert zones == []
+
+
+def test_native_stamp_annot_is_signature_zone():
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=400)
+    page.add_stamp_annot(fitz.Rect(50, 50, 180, 120))
+    zones = detect_signature_zones([], page_w=300, page_h=400, page=0, fitz_page=page, dpi=72)
+    assert len(zones) == 1
+    assert zones[0].zone == "signature"
+
+
+def test_native_ink_annot_is_signature_zone():
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=400)
+    page.add_ink_annot([[(40, 300), (70, 310), (110, 305), (150, 325), (180, 315)]])
+    zones = detect_signature_zones([], page_w=300, page_h=400, page=0, fitz_page=page, dpi=72)
+    assert len(zones) == 1
+    assert zones[0].zone == "signature"
+
+
+def test_stamp_text_does_not_drop_native_signature_image():
+    """Words sitting on the stamp (native-extracted seal text) would
+    shrink the ink-gap to nothing; the image zone must still fire."""
+    specs = [
+        *_HEADER,
+        ("BNI", 70, 330, 40, 16),
+        ("Isobelle", 40, 370, 70, 16),
+        ("Natali", 115, 370, 50, 16),
+    ]
+    page = _page_with_png((40, 300, 180, 365))
+    zones = detect_signature_zones(
+        _words(specs), page_w=300, page_h=400, page=0, fitz_page=page, dpi=72
+    )
+    image_zones = [z for z in zones if z.bbox.y < 370 and z.bbox.h >= 40]
+    assert image_zones, "expected the native signature image to be zoned"

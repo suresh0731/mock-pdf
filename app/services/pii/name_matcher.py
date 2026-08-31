@@ -129,3 +129,130 @@ def best_fuzzy_match(
     if best_idx == -1 or best_ratio < threshold:
         return None
     return best_idx, round(best_ratio, 4)
+
+
+# Institutional/organizational *boilerplate* — words that name a corporate
+# form or a generic banking/custody role rather than the entity's own
+# distinguishing identity. Deliberately narrow and hand-curated (not derived
+# from corpus word-frequency): a frequency-based cutoff was tried first and
+# rejected — on the real ~600-row client mapping table it also flagged
+# domain words like "insurance"/"assurance" as "generic" purely because
+# they're common, which then collapsed unrelated organizations that only
+# share a corporate-shell shape (e.g. "PT Prudential Life Assurance" vs.
+# the unrelated "PT MNC Life Assurance") into false matches. This list
+# contains only words that are near-universally corporate-form filler
+# across *any* institution's name, never a product/fund category word
+# (e.g. "insurance", "equities", "securities" stay OUT deliberately —
+# "NATIXIS - EQUITIES" and "Wholesale Banking - Securities Services" show
+# both can be part of a real distinguishing name, not filler).
+GENERIC_ORG_TOKENS: frozenset[str] = frozenset(
+    {
+        "bank",
+        "custody",
+        "custodian",
+        "kustodian",  # Indonesian spelling of "custodian"
+        "ltd",
+        "limited",
+        "corp",
+        "corporation",
+        "incorporated",
+        "inc",
+        "company",
+        "co",
+        "group",
+        "holding",
+        "holdings",
+        "wholesale",
+        "banking",
+        "services",
+    }
+)
+
+# A stripped string shorter than this carries too little signal to compare
+# safely — e.g. stripping every generic token from a candidate that was
+# *only* generic tokens ("Bank Custody Services") would otherwise leave an
+# empty or near-empty string that trivially "matches" almost anything.
+MIN_STRIPPED_LENGTH = 6
+
+# Bounds for treating a candidate token as "OCR noise on a specific known
+# word" rather than dropping it via exact GENERIC_ORG_TOKENS membership —
+# see ``strip_generic_org_tokens``'s ``fuzzy_against`` parameter. Both
+# bounds matter: length difference alone would let a short, unrelated
+# token like a single fund-class letter slip through; ratio alone would
+# accept a same-length-but-unrelated word. Calibrated against a real OCR
+# read ("Custody" -> "Cursdy", ratio 0.769, length diff 1) while checked
+# not to also accept unrelated-but-similarly-shaped word pairs (see
+# ``strip_generic_org_tokens``'s docstring for why a *global* version of
+# this same check was rejected).
+_OCR_NOISE_MAX_LEN_DIFF = 2
+_OCR_NOISE_MIN_RATIO = 0.75
+
+
+def _resembles_ocr_noise(token: str, known_words: frozenset[str]) -> bool:
+    """True if ``token`` is a bounded, close character-level match for one
+    of ``known_words`` — e.g. a single OCR-dropped/substituted letter —
+    not merely an unrelated word that happens to share some characters.
+    """
+    for word in known_words:
+        if abs(len(token) - len(word)) > _OCR_NOISE_MAX_LEN_DIFF:
+            continue
+        if fuzz.ratio(token, word) / 100.0 >= _OCR_NOISE_MIN_RATIO:
+            return True
+    return False
+
+
+def strip_generic_org_tokens(
+    normalized: str, *, fuzzy_against: frozenset[str] = frozenset()
+) -> str:
+    """Drop ``GENERIC_ORG_TOKENS`` words, keep everything else in order.
+
+    A curated mapping table entered by different people over time rarely
+    spells an institution's name the same way twice — one row calls it
+    ``"Standard Chartered Bank - Custody"``, another ``"PT Standard
+    Chartered Bank Custody"``, another just ``"Bank Standard Chartered"``.
+    Each variant adds/reorders/drops a *generic* corporate-form or
+    banking-role word around the same distinguishing name ("Standard
+    Chartered"), which dilutes ``token_sort_ratio`` enough (measured
+    directly: 0.88 at best across this table's own variants) to fall
+    below the stricter curated-entry threshold and leave a real,
+    dictionary-known organization completely unredacted. Stripping this
+    narrow, hand-curated boilerplate list before comparing lets two
+    spellings of the *same* name line up on their distinguishing words
+    instead of being penalized for boilerplate that differs only because
+    two people wrote the address block differently.
+
+    Only whole tokens are dropped — trailing punctuation (``"Bank,"``,
+    ``"Custody."``) is trimmed first so it doesn't hide a match, but a
+    token embedded in a longer word (``"Banking"`` inside a compound) is
+    never partially stripped.
+
+    Args:
+        normalized: Already-normalized text (see
+            ``mock_dictionary.normalize_source``) — never logged.
+        fuzzy_against: Extra words to also drop a token for on a close
+            (not exact) character match — e.g. an OCR misread of a
+            *specific known entry's own* boilerplate word, such as
+            "Custody" read as "Cursdy" (0.769 ratio). Deliberately scoped
+            to the caller's one candidate entry rather than
+            ``GENERIC_ORG_TOKENS`` as a whole: fuzzy-matching against the
+            *global* list would also flag real distinguishing words that
+            merely resemble a generic one (measured directly: "Equities"
+            vs. "Securities" scores an almost identical 0.778, but
+            "NATIXIS - EQUITIES" needs "Equities" to survive). Requiring
+            the fuzzy target to already be a token that's actually
+            present on this specific entry — checked only after the
+            *other* words already line up — keeps that risk out.
+
+    Returns:
+        Space-joined remaining tokens, in original order. May be empty
+        if every token was generic (or close enough to ``fuzzy_against``).
+    """
+    kept = []
+    for token in normalized.split():
+        cleaned = token.strip(".,")
+        if not cleaned or cleaned in GENERIC_ORG_TOKENS:
+            continue
+        if fuzzy_against and _resembles_ocr_noise(cleaned, fuzzy_against):
+            continue
+        kept.append(cleaned)
+    return " ".join(kept)

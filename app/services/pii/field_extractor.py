@@ -330,6 +330,23 @@ def _group_rows(words: list[EnsembleWord]) -> list[list[EnsembleWord]]:
     return rows
 
 
+def _reading_order(words: list[EnsembleWord]) -> list[EnsembleWord]:
+    """Sort words into natural top-to-bottom, left-to-right reading order.
+
+    A flat sort by x alone breaks down once ``words`` spans more than one
+    visual line whose x-ranges overlap — e.g. a table-cell value wrapped
+    onto a second, left-aligned line sits at nearly the same x positions
+    as the first line, so an x-only sort interleaves the two lines' words
+    instead of preserving line order (observed directly: a wrapped fund
+    name read back as "Selaras Blife Link Plus Campuran" instead of
+    "Blife Link Campuran Selaras Plus"). Reuses ``_group_rows``'s own
+    y-adjacency clustering — already tuned to keep one real line's OCR
+    y-jitter together while splitting genuinely distinct lines — to
+    bucket into lines first, then concatenates those buckets top-to-bottom.
+    """
+    return [w for line in _group_rows(words) for w in line]
+
+
 _CELL_OVERLAP_THRESHOLD = 0.6
 
 
@@ -362,20 +379,40 @@ def _word_overlap_fraction(word_bbox: BBox, cell_bbox: BBox) -> float:
 def _merge_oversegmented_cells(cells: list[DocBlock]) -> list[DocBlock]:
     """Merge vertically-adjacent sub-cells in the same column into logical cells.
 
-    Docling/img2table often report a single multi-line table cell as one
-    sub-cell per text line (observed directly on the user's table: the
-    bank-name cell "Standard Chartered Bank" was split into two cells,
-    and wrapped account-name cells were split similarly).  When those
-    sub-cells are kept separate, the row-stitching logic sees them as
-    distinct cells and cannot reunite the lines into one candidate.  This
-    merges sub-cells that are vertically close and aligned in the same
-    column, while leaving the larger gap between real table rows intact.
+    Docling often reports a single multi-line table cell as one sub-cell
+    per text line (observed directly on the user's table: the bank-name
+    cell "Standard Chartered Bank" was split into two cells, and wrapped
+    account-name cells were split similarly).  When those sub-cells are
+    kept separate, the row-stitching logic sees them as distinct cells and
+    cannot reunite the lines into one candidate.  This merges sub-cells
+    that are vertically close and aligned in the same column, while
+    leaving the larger gap between real table rows intact.
+
+    img2table cells (``block_id`` prefixed ``i2t-``) are excluded from this
+    merge and passed through unchanged: they're read directly off real
+    detected gridlines, so each one already *is* the true logical cell
+    boundary — the fragment-per-line failure mode this function exists to
+    correct only ever comes from Docling's own TableFormer output (see
+    ``table_geometry.py``'s module docstring). Re-running the vertical-gap
+    merge below on img2table cells anyway is actively harmful: on a
+    tightly, correctly bordered table, one real row's cell sits immediately
+    (near-zero gap) above the next real row's cell in the same column —
+    indistinguishable from a genuinely wrapped cell's fragmented lines by
+    gap alone — which silently welds separate table rows into one,
+    corrupting every row-stitching decision downstream (observed directly:
+    an entire header + all data rows chain-merged into a single row-group,
+    which then also fails the header row-length guard outright).
     """
     if not cells:
         return []
     cell_blocks = [c for c in cells if c.block_type == "cell" and c.bbox.w > 0 and c.bbox.h > 0]
     if not cell_blocks:
         return []
+
+    img2table_cells = [c for c in cell_blocks if c.block_id.startswith("i2t-")]
+    cell_blocks = [c for c in cell_blocks if not c.block_id.startswith("i2t-")]
+    if not cell_blocks:
+        return img2table_cells
 
     # Group cells by column using x-overlap.  Explicit table_column metadata
     # is intentionally ignored here: it can be None or noisy from img2table, and
@@ -415,7 +452,7 @@ def _merge_oversegmented_cells(cells: list[DocBlock]) -> list[DocBlock]:
         if run:
             merged.append(_union_cell_run(run))
 
-    return merged
+    return merged + img2table_cells
 
 
 def _union_cell_run(run: list[DocBlock]) -> DocBlock:
@@ -563,8 +600,8 @@ def _stitch_docling_cells(
 
     merged = list(groups.values())
     merged.sort(key=lambda row_words: min(w.bbox.y for w in row_words))
-    for row_words in merged:
-        row_words.sort(key=lambda w: w.bbox.x)
+    for i, row_words in enumerate(merged):
+        merged[i] = _reading_order(row_words)
     return merged
 
 
@@ -958,8 +995,7 @@ def _zone_words(row: list[EnsembleWord], left: float, right: float) -> list[Ense
         overlap = min(w.bbox.x + w.bbox.w, right) - max(w.bbox.x, left)
         if overlap / w.bbox.w >= _ZONE_WORD_OVERLAP_THRESHOLD:
             picked.append(w)
-    picked.sort(key=lambda w: w.bbox.x)
-    return picked
+    return _reading_order(picked)
 
 
 _PREFIX_BOUNDARY_TOLERANCE_PX = 6
@@ -1092,8 +1128,8 @@ def _zone_words_by_anchor(
             continue
         base[x_center].append(w)
         claimed_ids.add(id(w))
-    for words in base.values():
-        words.sort(key=lambda w: w.bbox.x)
+    for x_center in list(base):
+        base[x_center] = _reading_order(base[x_center])
     return base
 
 

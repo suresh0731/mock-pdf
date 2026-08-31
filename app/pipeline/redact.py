@@ -1565,6 +1565,8 @@ class RedactPipeline:
                 page=canonical.page_index,
                 existing_zones=zones,
                 enabled=opts.patch_signatures and self.settings.patch_signatures_enabled,
+                fitz_page=state.fitz_page if state.page_kind == "digital" else None,
+                dpi=state.dpi,
             )
             text_boxes = [r.padded_bbox for r in page_redactions]
             min_picture_area = (

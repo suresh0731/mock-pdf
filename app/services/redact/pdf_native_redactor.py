@@ -23,6 +23,9 @@ redaction is a separate final phase, run after text" requirement:
   ``PDF_REDACT_IMAGE_PIXELS`` (not the default ``PDF_REDACT_IMAGE_
   REMOVE``) so an image that extends beyond the detected zone only loses
   the covered pixels, not the whole image object.
+- :func:`strip_signature_artifacts` — after both phases, delete leftover
+  signature widgets and Stamp/Ink annotations whose appearance streams
+  can survive ``apply_redactions``.
 
 Both phases pass the same defensive ``images``/``graphics`` removal
 options to ``apply_redactions`` — not only the image phase — so any
@@ -348,6 +351,44 @@ def redact_text_regions(page: "fitz.Page", regions: Sequence[PaintedRegion], dpi
             font_name,
             preferred_size,
         )
+
+
+def strip_signature_artifacts(page: "fitz.Page") -> None:
+    """Drop leftover PDF signature widgets and Stamp/Ink annots.
+
+    ``apply_redactions`` removes page-content under a rect but does not
+    always delete a signature widget's appearance stream, so a digital
+    page can still *look* signed after the visual ink is blanked. A
+    redacted document also must not carry a still-valid-looking
+    cryptographic signature widget. Failures are logged and skipped —
+    never abort the page over one stubborn annot.
+    """
+    try:
+        widgets = list(page.widgets() or [])
+    except Exception:
+        widgets = []
+    for widget in widgets:
+        if getattr(widget, "field_type", None) != fitz.PDF_WIDGET_TYPE_SIGNATURE:
+            continue
+        try:
+            page.delete_widget(widget)
+        except Exception:
+            logger.warning("strip_signature_artifacts: widget delete failed", exc_info=True)
+    try:
+        annots = list(page.annots() or [])
+    except Exception:
+        annots = []
+    for annot in annots:
+        try:
+            kind = annot.type[1]
+        except (AttributeError, TypeError, IndexError):
+            continue
+        if kind not in ("Stamp", "Ink"):
+            continue
+        try:
+            page.delete_annot(annot)
+        except Exception:
+            logger.warning("strip_signature_artifacts: annot delete failed", exc_info=True)
 
 
 def redact_image_regions(page: "fitz.Page", regions: Sequence[PaintedRegion], dpi: int) -> None:

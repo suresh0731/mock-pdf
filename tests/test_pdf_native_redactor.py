@@ -12,6 +12,7 @@ import fitz
 from app.services.redact.pdf_native_redactor import (
     redact_image_regions,
     redact_text_regions,
+    strip_signature_artifacts,
 )
 
 _DPI = 200
@@ -195,3 +196,38 @@ def test_phases_run_in_order_text_then_image_on_same_page():
     text = page.get_text()
     assert "Jane Roe" not in text
     assert "PERSON_02" in text
+
+
+def test_strip_signature_artifacts_removes_stamp_and_ink():
+    page = _new_page(width=300, height=200)
+    page.add_stamp_annot(fitz.Rect(10, 10, 80, 50))
+    page.add_ink_annot([[(10, 80), (40, 90), (70, 85)]])
+    strip_signature_artifacts(page)
+    leftover = [a.type[1] for a in (page.annots() or [])]
+    assert "Stamp" not in leftover
+    assert "Ink" not in leftover
+
+
+def test_redact_image_regions_blanks_signature_image():
+    """Brand/signature zone over an embedded signature image must pixel-
+    blank it (the digital-PDF path), not leave the ink visible."""
+    import io as _io
+
+    from PIL import Image as _Image
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    buf = _io.BytesIO()
+    _Image.new("RGB", (80, 40), (0, 0, 200)).save(buf, format="PNG")
+    page.insert_image(fitz.Rect(20, 140, 120, 190), stream=buf.getvalue())
+    zone = _region(
+        x=int(20 * _SCALE),
+        y=int(140 * _SCALE),
+        w=int(100 * _SCALE),
+        h=int(50 * _SCALE),
+        assignment_source="brand",
+        mock_value="",
+    )
+    redact_image_regions(page, [zone], _DPI)
+    pix = page.get_pixmap(colorspace=fitz.csRGB)
+    assert pix.pixel(40, 160) == (255, 255, 255)

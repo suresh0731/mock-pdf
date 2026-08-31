@@ -14,7 +14,11 @@ from typing import Protocol
 import fitz
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.redact.pdf_native_redactor import redact_image_regions, redact_text_regions
+from app.services.redact.pdf_native_redactor import (
+    redact_image_regions,
+    redact_text_regions,
+    strip_signature_artifacts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +277,7 @@ def _append_vector_page(
         clone_page = clone_doc[0]
         redact_text_regions(clone_page, regions, dpi)
         redact_image_regions(clone_page, regions, dpi)
+        strip_signature_artifacts(clone_page)
         doc.insert_pdf(clone_doc, from_page=0, to_page=0)
     finally:
         clone_doc.close()

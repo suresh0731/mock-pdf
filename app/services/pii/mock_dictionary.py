@@ -25,8 +25,11 @@ from pydantic import BaseModel
 
 from app.models.mock import MockEntry, MockMappingNotFound, MockValidationError
 from app.services.pii.name_matcher import (
+    GENERIC_ORG_TOKENS,
+    MIN_STRIPPED_LENGTH,
     is_deliberate_family_pair,
     is_token_subset_collision,
+    strip_generic_org_tokens,
     token_sort_ratio,
 )
 from app.utils.atomic_write import atomic_write_text
@@ -69,6 +72,26 @@ _AUTO_SUFFIX_FALLBACK_LENGTHS = (8, 12, 16, 32, 64)
 # rows score >=0.90 against each other) — that needs spatial/contextual
 # disambiguation, not a name-similarity threshold, and remains a known gap.
 _TRUSTED_FUZZY_THRESHOLD = 0.90
+
+# Fallback acceptance path for a trusted entry that misses
+# _TRUSTED_FUZZY_THRESHOLD only because the two spellings disagree on
+# generic corporate/banking boilerplate (see
+# name_matcher.strip_generic_org_tokens) — e.g. the curated table's own
+# "Standard Chartered Bank - Custody" vs. an OCR read of "Standard
+# Chartered Custody" scores 0.88 raw (below 0.90) but 1.0 once both sides
+# drop "Bank"/"Custody". Deliberately still *below* 1.0 itself (not an
+# exact-string requirement) to tolerate a little OCR noise on the
+# distinguishing words that are left after stripping (e.g. "Standerd" for
+# "Standard"). Calibrated against this codebase's full ~600-row real
+# client mapping table: at 0.92, every pair of *different* real
+# organizations/funds in that table that newly clears this path also
+# turned out to be the same institution spelled two different ways
+# (already an existing mock-mapping ambiguity the table itself contains,
+# surfaced via find_prefix_collisions) rather than two distinct entities
+# — see tests/test_mock_dictionary.py for the specific cases this was
+# checked against (Prudential vs. MNC-shaped family confusion in
+# particular must stay rejected).
+_GENERIC_STRIP_RATIO_FLOOR = 0.92
 
 # Every auto-assigned mock value shares one generic prefix — matching (and
 # the mock value itself) is by name text only, irrespective of whatever PII
@@ -239,6 +262,19 @@ class _InMemoryDictionary:
         entry only, so a stricter re-scan against each candidate's own
         threshold is kept here rather than trying to fold both thresholds
         into one shared comparison.
+
+        A trusted entry that misses its own threshold gets one more
+        chance via ``strip_generic_org_tokens`` (see
+        ``_GENERIC_STRIP_RATIO_FLOOR``) — restricted to trusted entries
+        only, since an auto-assigned entry was never human-verified and
+        so doesn't earn the extra leniency curated rows get. The
+        candidate side also gets a fuzzy pass against *this entry's own*
+        generic tokens (e.g. "Custody" misread as "Cursdy") rather than
+        the full generic word list — see ``strip_generic_org_tokens``'s
+        ``fuzzy_against`` docstring for why that scoping matters. Both
+        acceptance paths still rank purely by the *raw* ratio, so the
+        single highest-raw-similarity entry always wins regardless of
+        which path let it in.
         """
         best_id: str | None = None
         best_ratio = -1.0
@@ -246,7 +282,25 @@ class _InMemoryDictionary:
             trusted = entry.assignment_source == "user"
             threshold = _TRUSTED_FUZZY_THRESHOLD if trusted else self._fuzzy_threshold
             ratio = token_sort_ratio(normalized, entry.normalized)
-            if ratio >= threshold and ratio > best_ratio:
+            accepted = ratio >= threshold
+            if not accepted and trusted:
+                entry_stripped = strip_generic_org_tokens(entry.normalized)
+                entry_generic_present = frozenset(
+                    token
+                    for raw_token in entry.normalized.split()
+                    if (token := raw_token.strip(".,")) in GENERIC_ORG_TOKENS
+                )
+                candidate_stripped = strip_generic_org_tokens(
+                    normalized, fuzzy_against=entry_generic_present
+                )
+                accepted = (
+                    len(candidate_stripped) >= MIN_STRIPPED_LENGTH
+                    and len(entry_stripped) >= MIN_STRIPPED_LENGTH
+                    and not is_deliberate_family_pair(candidate_stripped, entry_stripped)
+                    and token_sort_ratio(candidate_stripped, entry_stripped)
+                    >= _GENERIC_STRIP_RATIO_FLOOR
+                )
+            if accepted and ratio > best_ratio:
                 best_ratio = ratio
                 best_id = entry.mapping_id
         return best_id
