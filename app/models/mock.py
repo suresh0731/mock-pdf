@@ -105,6 +105,8 @@ class MockDictionaryStoreProtocol(Protocol):
 
     def best_match_score(self, normalized: str) -> float: ...
 
+    def best_unambiguous_match(self, normalized: str) -> tuple[MockEntry | None, float]: ...
+
 
 class LedgerStoreProtocol(Protocol):
     """Contract for per-job substitution ledger persistence."""

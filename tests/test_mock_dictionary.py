@@ -567,6 +567,94 @@ def test_resolve_no_collision_warning_for_same_mock_aliases(
     assert "mock_prefix_collision_detected" not in caplog.text
 
 
+# --- Last-resort fallback for a field-anchored candidate that misses
+# lookup()'s trusted-fuzzy bar (see best_unambiguous_match) -------------
+
+
+def test_best_unambiguous_match_accepts_decisively_ahead_ocr_variant(
+    store: MockDictionaryStore,
+) -> None:
+    """The real "PT 8NILIFE INSURANCE" case: a merged, digit-substituted
+    misread of "PT BNI LIFE INSURANCE" scores only 0.73 (well below
+    lookup()'s 0.90 trusted-fuzzy bar) but is still decisively ahead of
+    every other, unrelated entry — safe to trust.
+    """
+    target = store.upsert("PT BNI LIFE INSURANCE", "Client-30608778491")
+    store.upsert("Sompo Insurance Indonesia", "ORG_UNRELATED")
+    assert store.lookup("PT 8NILIFE INSURANCE") is None
+
+    entry, ratio = store.best_unambiguous_match("pt 8nilife insurance")
+
+    assert entry is not None
+    assert entry.mapping_id == target.mapping_id
+    assert 0.70 < ratio < 0.80
+
+
+def test_best_unambiguous_match_accepts_family_sibling_ocr_variant(
+    store: MockDictionaryStore,
+) -> None:
+    """The real "Blife Uink Campuran Selaras Plus" case ("Uink" for
+    "Link"): the top match is a deliberate family pair with its own
+    closest competitor ("... Selaras", missing "Plus"), which must not
+    veto the very match it names — the winner is still decisively ahead
+    of any genuinely unrelated entry ("... Kombinasi").
+    """
+    plus_entry = store.upsert("Blife Link Campuran Selaras Plus", "Client-30608788780")
+    store.upsert("Blife Link Campuran Selaras", "Client-30608788748")
+    store.upsert("Blife Link Campuran Kombinasi", "Client-30608788845")
+
+    entry, ratio = store.best_unambiguous_match("blife uink campuran selaras plus")
+
+    assert entry is not None
+    assert entry.mapping_id == plus_entry.mapping_id
+    assert ratio > 0.80
+
+
+def test_best_unambiguous_match_rejects_close_unrelated_sibling(
+    store: MockDictionaryStore,
+) -> None:
+    """The shape of the documented _TRUSTED_FUZZY_THRESHOLD false-positive
+    this must still reject: two genuinely different real organizations
+    (neither a token-subset of the other — "gamma" vs. "delta", not a
+    "PARENT"/"PARENT PLUS" family) score identically against a garbled
+    query missing the one distinguishing token — picking either would be
+    a coin flip.
+    """
+    store.upsert("Alpha Beta Gamma Corp", "ORG_GAMMA")
+    store.upsert("Alpha Beta Delta Corp", "ORG_DELTA")
+
+    entry, ratio = store.best_unambiguous_match("alpha beta corp")
+
+    assert entry is None
+    assert ratio == 0.0
+
+
+def test_best_unambiguous_match_rejects_below_floor(store: MockDictionaryStore) -> None:
+    store.upsert("PT BNI LIFE INSURANCE", "Client-30608778491")
+    entry, ratio = store.best_unambiguous_match("completely unrelated text")
+    assert entry is None
+    assert ratio == 0.0
+
+
+def test_best_unambiguous_match_blank_normalized_returns_none(
+    store: MockDictionaryStore,
+) -> None:
+    store.upsert("PT BNI LIFE INSURANCE", "Client-30608778491")
+    entry, ratio = store.best_unambiguous_match("")
+    assert entry is None
+    assert ratio == 0.0
+
+
+def test_best_unambiguous_match_never_mutates_hit_count(store: MockDictionaryStore) -> None:
+    target = store.upsert("PT BNI LIFE INSURANCE", "Client-30608778491")
+    assert target.hit_count == 0
+
+    store.best_unambiguous_match("pt 8nilife insurance")
+
+    refreshed = next(e for e in store.list() if e.mapping_id == target.mapping_id)
+    assert refreshed.hit_count == 0
+
+
 def test_load_skips_duplicate_mapping_ids(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     now = datetime.now(timezone.utc).isoformat()
     payload = {

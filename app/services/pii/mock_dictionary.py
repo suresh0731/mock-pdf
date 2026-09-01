@@ -93,6 +93,26 @@ _TRUSTED_FUZZY_THRESHOLD = 0.90
 # particular must stay rejected).
 _GENERIC_STRIP_RATIO_FLOOR = 0.92
 
+# Floor and decisive margin for ``best_unambiguous_match``'s last-resort
+# fallback (see its docstring) — deliberately much looser than
+# _TRUSTED_FUZZY_THRESHOLD's 0.90 on the score itself, because the margin
+# check is what actually carries the safety burden here, not the floor.
+# Calibrated directly against complete_client_mappings.csv's two motivating
+# real OCR misreads: "PT 8NILIFE INSURANCE" (a merged, digit-substituted
+# "PT BNI LIFE INSURANCE") scores 0.732 with its closest unrelated
+# competitor ("Sompo Insurance Indonesia") at 0.622 — an 0.11 margin — and
+# "Blife Uink Campuran Selaras Plus" ("Uink" for "Link") scores 0.844
+# against its own family sibling "... Selaras" (0.814, excluded from the
+# margin check by the token-subset carve-out) with its closest genuinely
+# unrelated competitor ("... Kombinasi") at 0.689 — an 0.155 margin. The
+# documented false-positive this must still reject (_TRUSTED_FUZZY_
+# THRESHOLD's "PT MNC Life Assurance" vs. unrelated "PT Prudential Life
+# Assurance" scoring 0.7755) is exactly the shape this margin check is
+# for: that pair's margin over each other is 0 by definition (each is the
+# other's best match), so it's correctly rejected regardless of the floor.
+_FIELD_FALLBACK_FLOOR = 0.60
+_FIELD_FALLBACK_MARGIN = 0.10
+
 # Every auto-assigned mock value shares one generic prefix — matching (and
 # the mock value itself) is by name text only, irrespective of whatever PII
 # category the caller detected the span as.
@@ -327,6 +347,64 @@ class _InMemoryDictionary:
         with self._lock:
             _, ratio = self._best_match(normalized)
         return ratio
+
+    def best_unambiguous_match(self, normalized: str) -> tuple[MockEntry | None, float]:
+        """Best-scoring entry and its ratio, but only when nothing else in
+        the dictionary comes close enough to make that pick risky.
+
+        Pure read (like ``best_match_score`` — never mutates ``hit_count``/
+        ``updated_at``): a last-resort fallback for a field-anchored PII
+        candidate (see ``app.pipeline.redact``'s ``restrict_to_known_
+        mappings`` handling) whose OCR noise is severe enough to miss
+        ``lookup()``'s trusted-fuzzy bar entirely, where the alternative
+        is leaving genuine, already-structurally-identified PII completely
+        unredacted — but only worth taking when the top match isn't a
+        coin-flip against some other, unrelated real entry.
+
+        "Comes close enough to be risky" is measured against every OTHER
+        entry except ones sharing a token-subset relationship with the
+        winner (``is_token_subset_collision`` — a deliberate "PARENT" /
+        "PARENT PLUS" family pair, which ``find_prefix_collisions``
+        already exists to disambiguate on the caller's side via geometry,
+        not name-similarity alone, and so must not itself veto the very
+        match it names). Without that carve-out, two entries that are
+        legitimately supposed to score near-identically (by construction)
+        would always fail this margin check.
+
+        Args:
+            normalized: Already-normalized candidate text (see
+                ``normalize_source``).
+
+        Returns:
+            ``(entry, ratio)`` for the winning match, or ``(None, 0.0)``
+            if the dictionary is empty, ``normalized`` is blank, or the
+            best match isn't decisively ahead of its closest unrelated
+            competitor.
+        """
+        if not normalized.strip():
+            return None, 0.0
+        with self._lock:
+            best_entry: MockEntry | None = None
+            best_ratio = 0.0
+            for entry in self._by_id.values():
+                ratio = token_sort_ratio(normalized, entry.normalized)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_entry = entry
+            if best_entry is None or best_ratio < _FIELD_FALLBACK_FLOOR:
+                return None, 0.0
+            runner_up_ratio = 0.0
+            for entry in self._by_id.values():
+                if entry.mapping_id == best_entry.mapping_id:
+                    continue
+                if is_token_subset_collision(best_entry.normalized, entry.normalized):
+                    continue
+                ratio = token_sort_ratio(normalized, entry.normalized)
+                if ratio > runner_up_ratio:
+                    runner_up_ratio = ratio
+            if best_ratio - runner_up_ratio < _FIELD_FALLBACK_MARGIN:
+                return None, 0.0
+            return best_entry.model_copy(deep=True), best_ratio
 
     def find_prefix_collisions(
         self, normalized: str, *, exclude_mapping_id: str | None = None

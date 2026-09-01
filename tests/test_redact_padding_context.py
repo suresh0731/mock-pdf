@@ -286,3 +286,38 @@ def test_line_wrap_clusters_none_for_column_aligned_wrapped_cell():
     line1_word = _word("Standard", 10, 20, 60, 12)
     line2_word = _word("Chartered", 10, 40, 65, 12)
     assert _line_wrap_clusters([line1_word, line2_word]) is None
+
+
+def test_line_wrap_clusters_splits_ordinary_left_margin_paragraph_wrap():
+    """A plain sentence wrap — the matched words end partway through one
+    line and resume at the next line's left margin, rather than at the
+    opposite/extreme x an "opposite ends" table-cell split would take —
+    must still be split into tight per-line boxes.
+
+    Modeled on a real regression: "REKSA DANA PENDAPATAN TETAP" sitting
+    at the tail of one line (several unrelated words already precede it
+    on that same line) and "BNI AM TEAKWOOD KELAS R1" resuming at the
+    next line's left margin. The union of the two per-line clusters is
+    only ~1.53x their combined own widths — short of the old 1.6
+    "extreme ends" threshold, which let this fall through as one giant
+    box spanning nearly the full width of both lines and swallowing the
+    unrelated text physically sitting in the gap on each line.
+    """
+    line1_words = [
+        _word("REKSA", 1327, 1240, 104, 47),
+        _word("DANA", 1441, 1240, 96, 47),
+        _word("PENDAPATAN", 1547, 1240, 225, 47),
+        _word("TETAP", 1781, 1241, 105, 46),
+    ]
+    line2_words = [
+        _word("BNI", 215, 1289, 64, 45),
+        _word("AM", 288, 1289, 50, 45),
+        _word("TEAKWOOD", 361, 1289, 197, 45),
+        _word("KELAS", 574, 1289, 101, 45),
+        _word("R1", 684, 1289, 65, 45),
+    ]
+    clusters = _line_wrap_clusters(line1_words + line2_words)
+    assert clusters is not None
+    assert len(clusters) == 2
+    assert sorted(clusters[0], key=lambda w: w.text) == sorted(line1_words, key=lambda w: w.text)
+    assert sorted(clusters[1], key=lambda w: w.text) == sorted(line2_words, key=lambda w: w.text)

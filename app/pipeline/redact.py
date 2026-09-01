@@ -632,8 +632,25 @@ _ROW_CLUSTER_MAX_HEIGHT_FACTOR = 1.5
 # How much wider the combined union of a match's per-line word clusters
 # must be than the clusters' own widths added together before it's treated
 # as a genuine line-wrap split rather than compactly co-located text (see
-# _line_wrap_clusters).
-_LINE_WRAP_WASTE_RATIO = 1.6
+# _line_wrap_clusters). A ratio of exactly 1.0 is the natural dividing
+# line: the per-line clusters' own widths summed can only exceed the
+# union's width (ratio < 1) when their horizontal extents *overlap* —
+# the column-aligned wrapped-cell shape, where every line starts at
+# roughly the same x — and can only be smaller than the union (ratio > 1)
+# when there's a genuine, uncovered horizontal gap between them, which is
+# exactly the tail-of-line-1 / head-of-line-2 shape a real paragraph or
+# sentence wrap takes (an ordinary left-margin continuation included, not
+# just the "opposite ends" extreme). 1.05 keeps a small buffer above 1.0
+# for OCR box jitter without needing the union to be drastically wider
+# than the fragments themselves — a real, if modest, gap is already
+# proof the words don't compactly co-locate, and painting one box across
+# it would otherwise sweep in whatever unrelated text fills that gap on
+# both lines (see the regression this guards: a match whose own words
+# were "REKSA DANA PENDAPATAN TETAP" at the tail of one line and "BNI AM
+# TEAKWOOD KELAS R1" at the head of the next, ratio ~1.53, was falling
+# through this gate under the old 1.6 threshold and painting a single
+# box spanning nearly the full width of both lines).
+_LINE_WRAP_WASTE_RATIO = 1.05
 
 
 def _row_clusters(words: list[EnsembleWord]) -> list[list[EnsembleWord]]:
@@ -708,19 +725,24 @@ def _line_wrap_clusters(
     whatever unrelated text sits between the two clusters' horizontal
     extents: the box's x-range runs from the second line's left-most
     matched word to the first line's right-most one, i.e. nearly the full
-    line width on *both* lines, not just the matched words themselves.
-    Detected via a "waste ratio": if the combined union of the per-line
-    clusters is much wider than the clusters' own widths added together,
-    the words sit at opposite/extreme horizontal ends of adjacent lines
-    rather than compactly co-located, and the caller should paint one
-    tight box per line instead of a single union box (see
-    ``_collect_redactions``, which paints the mock value on only one of
-    the resulting boxes and a blank white patch on the rest).
+    line width on *both* lines, not just the matched words themselves —
+    and this isn't only an "opposite ends" extreme: an ordinary
+    left-margin paragraph continuation (the tail of one sentence ending
+    mid-line, its wrap starting a fresh line at the left margin) takes
+    this same shape and sweeps in just as much unrelated text. Detected
+    via a "waste ratio": if the combined union of the per-line clusters
+    is any wider than the clusters' own widths added together, there's a
+    genuine, uncovered horizontal gap between them — the words don't
+    compactly co-locate — and the caller should paint one tight box per
+    line instead of a single union box (see ``_collect_redactions``,
+    which paints the mock value on only one of the resulting boxes and a
+    blank white patch on the rest).
 
     Returns ``None`` when there's only one visual line, or when the
-    clusters don't show this "extreme ends" shape — e.g. a wrapped table
-    cell's lines, which stay column-aligned rather than spreading to
-    opposite ends, are correctly left as a single box.
+    clusters' own horizontal extents overlap rather than leaving a gap —
+    e.g. a wrapped table cell's lines, which stay column-aligned (every
+    line starting at roughly the same x) rather than leaving daylight
+    between them, are correctly left as a single box.
     """
     clusters = _row_clusters(matched_words)
     if len(clusters) < 2:
@@ -733,6 +755,42 @@ def _line_wrap_clusters(
     union_x2 = max(b.x + b.w for b in boxes)
     union_w = union_x2 - union_x1
     if combined_w <= 0 or union_w <= combined_w * _LINE_WRAP_WASTE_RATIO:
+        return None
+    return clusters
+
+
+def _digital_native_line_wrap_clusters(
+    matched_words: list[EnsembleWord],
+) -> list[list[EnsembleWord]] | None:
+    """Digital-page-only fallback for a match ``_line_wrap_clusters``
+    itself leaves unsplit because every line starts at the same left
+    margin — the normal shape for a deliberately multi-line field value
+    (e.g. a wrapped postal address split "MFAR GREEN HEART, PHASE IV" /
+    "MFAR-MANYATA TECH PARK" across two real PDF lines), as opposed to
+    an accidentally-wrapped prose sentence whose *tail* lands mid-line.
+    ``_line_wrap_clusters``'s waste-ratio gate treats that shape the
+    same as a wrapped table cell's column-aligned lines (deliberately —
+    see its own docstring) and keeps it as one box, which still paints a
+    single, oversized patch with the mock value floating, vertically
+    centered, across both lines instead of tight per-line boxes.
+
+    Only ever called for a digital (native-PDF-text) page — never a
+    scanned/OCR one. ``_row_clusters``'s row split is trustworthy
+    outright here: ``native_text.py`` assigns every word on a line the
+    PDF's own exact ``(block_no, line_no)`` bbox straight from the
+    content stream, not an OCR-inferred one, so there's none of the
+    noisy-row-detection ambiguity ``_line_wrap_clusters``'s gate exists
+    to guard scanned pages against (see ``_row_clusters``'s docstring).
+    Scanned-page behavior (and its regression tests) is entirely
+    untouched — this is only ever consulted as an *additional* fallback
+    when ``_line_wrap_clusters`` already returned ``None``, and only on
+    a digital page (see ``_collect_redactions``).
+
+    Returns ``None`` when there's only one visual line (nothing to
+    split), else every visual row ``_row_clusters`` finds.
+    """
+    clusters = _row_clusters(matched_words)
+    if len(clusters) < 2:
         return None
     return clusters
 
@@ -1389,6 +1447,17 @@ class RedactPipeline:
                     if cell_bbox is None and matched_words
                     else None
                 )
+                if (
+                    line_clusters is None
+                    and cell_bbox is None
+                    and matched_words
+                    and state.page_kind == "digital"
+                ):
+                    # Digital-only fallback — see
+                    # _digital_native_line_wrap_clusters. Never runs for
+                    # a scanned page: state.page_kind gates it strictly,
+                    # so existing OCR line-wrap behavior is unchanged.
+                    line_clusters = _digital_native_line_wrap_clusters(matched_words)
                 if line_clusters is not None:
                     candidate_boxes = [
                         (cluster_bbox, cluster)
@@ -1420,7 +1489,19 @@ class RedactPipeline:
                     # full, correct vertical extent in sub_bbox already —
                     # adding the usual top/bottom padding on top of that
                     # risks bleeding into a tightly-packed neighboring row.
-                    sub_multiline = len(_row_clusters(sub_words)) > 1 if sub_words else False
+                    # A per-line box carved out of line_clusters is, on its
+                    # own, single-line — but it's still only a fragment of
+                    # an originally multi-line match sitting immediately
+                    # above/below its sibling line box, so it needs the
+                    # same padding suppression: a tightly-leaded document
+                    # (e.g. a digital bank statement) can pack the next
+                    # real line close enough that even the small per-tier
+                    # pad reaches into it, and vector-native redaction
+                    # (pdf_native_redactor.py) genuinely deletes whatever
+                    # text its rect touches — not just visually covers it.
+                    sub_multiline = line_clusters is not None or (
+                        len(_row_clusters(sub_words)) > 1 if sub_words else False
+                    )
                     sub_padded = apply_padding(
                         sub_original_bbox,
                         canonical.transform.blur_tier,
@@ -1453,6 +1534,25 @@ class RedactPipeline:
                     # is not None) are a direct user instruction and always
                     # resolve/create regardless.
                     entry = self.mock_store.lookup(source_text)
+                    if entry is None and cand_words:
+                        # A field-anchored candidate (cand_words truthy —
+                        # e.g. a "Nama Rekening" table-cell value) already
+                        # carries its own layout-based confidence that this
+                        # span *is* PII, independent of exact spelling.
+                        # restrict_to_known_mappings exists to stop new,
+                        # auto-created dictionary rows for unseen text (see
+                        # Settings.restrict_to_known_mappings) — it isn't
+                        # meant to let an already-known client name leak
+                        # through fully unredacted just because a couple of
+                        # OCR-garbled characters push it under lookup()'s
+                        # trusted-fuzzy bar (e.g. "PT 8NILIFE INSURANCE" for
+                        # "PT BNI LIFE INSURANCE"). best_unambiguous_match
+                        # only hands back a match when it's decisively
+                        # ahead of every other, unrelated entry, so this
+                        # never risks painting the wrong client's mock over
+                        # a merely-similar one.
+                        normalized_fallback = normalize_source(source_text)
+                        entry, _ratio = self.mock_store.best_unambiguous_match(normalized_fallback)
                     if entry is None:
                         continue
                 else:
