@@ -90,20 +90,135 @@ def _cell_bbox(cell: object) -> BBox | None:
     return BBox(x=int(round(box.x1)), y=int(round(box.y1)), w=w, h=h)
 
 
+_COLLAPSED_ROW_HEIGHT_FRACTION = 0.5
+
+
+def _max_row_height_fraction(table: object) -> float:
+    """Tallest row's height as a fraction of the whole table's own height.
+
+    A genuinely bordered table's rows (even a multi-line-wrapped one) each
+    take up a modest, fairly even slice of the table — see
+    ``_prefer_bordered_tables``'s docstring for the two real measurements
+    (~0.2-0.25) this is calibrated against. A borderless table the strict
+    (``implicit_rows=False``) pass couldn't split at all instead collapses
+    almost everything below the header into one giant row spanning nearly
+    the table's full height (observed directly: ~0.97) — this ratio is
+    what tells the two apart. Returns 1.0 (maximally "collapsed") for a
+    degenerate zero-height table rather than raising.
+    """
+    content = getattr(table, "content", None) or {}
+    table_box = _table_bbox(table)
+    table_h = table_box.h if table_box is not None else 0
+    if table_h <= 0:
+        return 1.0
+    max_row_h = 0.0
+    for row in content.values():
+        cell_boxes = [b for c in row if (b := _cell_bbox(c)) is not None]
+        if not cell_boxes:
+            continue
+        row_top = min(b.y for b in cell_boxes)
+        row_bottom = max(b.y + b.h for b in cell_boxes)
+        max_row_h = max(max_row_h, row_bottom - row_top)
+    return max_row_h / table_h if max_row_h else 1.0
+
+
+def _prefer_bordered_tables(strict_tables: list, implicit_tables: list) -> list:
+    """Reconcile img2table's two extraction passes per detected table region.
+
+    ``implicit_rows=True`` (the ``implicit`` pass) infers a row break from
+    text-line spacing whenever there's no real horizontal border at that
+    y-position — necessary for a genuinely borderless table (e.g. a bank
+    statement's transaction list with only vertical column rules), but it
+    applies that same inference *inside* an ordinary bordered table too: a
+    multi-line-wrapped cell's blank inter-line gap looks just like an
+    inter-row gap to that heuristic, so a real, single, bordered row
+    wrapping a fund name onto 2-3 lines gets sliced into one phantom
+    sub-row per physical text line (observed directly: a 7-row bordered
+    table became 14 "rows"). Those phantom sub-rows are never merged back
+    by ``field_extractor._merge_oversegmented_cells`` — it deliberately
+    trusts every img2table cell as already reading a real detected
+    gridline — so the wrapped cell's own continuation lines end up
+    assigned to a different "cell" than its first line, breaking
+    multi-line PII redaction for that row.
+
+    The ``strict`` pass (``implicit_rows=False``) never has this problem:
+    a row boundary only ever comes from a real detected border, so a
+    genuinely bordered table's row count from this pass is trustworthy
+    ground truth. It just can't find *any* row structure in a borderless
+    table (observed directly: the same real bordered-columns-only bank
+    statement table collapsed from 31 rows to 2), so it can't simply
+    replace the implicit pass outright either.
+
+    Reconciling the two: for each strict-pass table whose tallest row
+    doesn't dominate the table (below ``_COLLAPSED_ROW_HEIGHT_FRACTION`` —
+    i.e. real borders actually did split it into multiple, reasonably
+    even rows: the bordered-table case, wrapped cells included), keep the
+    strict pass's cells for that region. Otherwise (the strict pass
+    couldn't resolve real row structure there at all and collapsed most
+    of the table into one row — the borderless case), fall back to the
+    implicit pass's cells for that region, exactly matching this module's
+    pre-existing behavior for borderless tables. A table only one pass
+    detected at all passes through from whichever pass found it.
+    """
+    used_implicit_idx: set[int] = set()
+
+    def _find_corroborating_implicit(
+        box: BBox | None,
+    ) -> tuple[int, object] | None:
+        if box is None:
+            return None
+        for i, i_table in enumerate(implicit_tables):
+            if i in used_implicit_idx:
+                continue
+            i_box = _table_bbox(i_table)
+            if i_box is not None and _iou(box, i_box) >= _DEFAULT_MIN_TABLE_IOU:
+                return i, i_table
+        return None
+
+    chosen: list = []
+    for s_table in strict_tables:
+        s_box = _table_bbox(s_table)
+        match = _find_corroborating_implicit(s_box)
+        collapsed = _max_row_height_fraction(s_table) >= _COLLAPSED_ROW_HEIGHT_FRACTION
+        if collapsed and match is not None:
+            chosen.append(match[1])
+        else:
+            chosen.append(s_table)
+        if match is not None:
+            used_implicit_idx.add(match[0])
+
+    chosen.extend(
+        i_table for i, i_table in enumerate(implicit_tables) if i not in used_implicit_idx
+    )
+    return chosen
+
+
 def _run_img2table(image: Image.Image) -> list:
-    """Run img2table's border-based extraction on `image`. Text-free (ocr=None)."""
+    """Run img2table's border-based extraction on `image`. Text-free (ocr=None).
+
+    Runs twice — once with ``implicit_rows=False`` (real borders only),
+    once with the original ``implicit_rows=True`` (borderless-table
+    inference) — and reconciles the two per detected table region; see
+    ``_prefer_bordered_tables`` for why neither pass alone is trustworthy
+    for every table shape.
+    """
     from img2table.document import Image as Img2TableImage
 
     buf = io.BytesIO()
     image.convert("RGB").save(buf, format="PNG")
-    doc = Img2TableImage(src=buf.getvalue())
-    return doc.extract_tables(
+    common_kwargs = dict(
         ocr=None,
-        implicit_rows=True,
         implicit_columns=True,
         borderless_tables=True,
         min_confidence=50,
     )
+    strict_tables = Img2TableImage(src=buf.getvalue()).extract_tables(
+        implicit_rows=False, **common_kwargs
+    )
+    implicit_tables = Img2TableImage(src=buf.getvalue()).extract_tables(
+        implicit_rows=True, **common_kwargs
+    )
+    return _prefer_bordered_tables(strict_tables, implicit_tables)
 
 
 def _table_to_blocks(table: object, start_idx: int) -> list[DocBlock]:

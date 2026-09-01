@@ -1094,18 +1094,43 @@ def _zone_words_by_anchor(
     independent of Docling cells) is what recovers those specifically, by
     checking against a closed prefix vocabulary rather than loosening this
     generic, garbled-OCR-prone position check.
+
+    The x-range test can also *over*-capture: a wide column's header
+    label sits well inside the column, so the header-anchor midpoint used
+    as this zone's boundary can fall short of the column's true right
+    edge — a wrapped cell's later, longer lines then drift past that
+    boundary and get pulled directly into the *neighboring* zone's own
+    raw x-range instead (the mirror image of the under-capture case
+    above: this word matches some zone's test, just the wrong one). A
+    word whose Docling cell is shared by several other words already
+    settled in a different zone is reassigned to that zone — the cell's
+    majority vote is trusted over any single word's raw x-position.
     """
     base = {anchor.x_center: _zone_words(row, left, right) for left, right, anchor in zones}
     _rescue_left_prefix_words(row, base)
     if not cell_ids:
         return base
-    claimed_ids = {id(w) for words in base.values() for w in words}
-    zone_for_cell: dict[int, float] = {}
+    cell_zone_votes: dict[int, Counter[float]] = {}
     for x_center, words in base.items():
         for w in words:
             cell_id = cell_ids.get(id(w))
             if cell_id is not None:
-                zone_for_cell.setdefault(cell_id, x_center)
+                cell_zone_votes.setdefault(cell_id, Counter())[x_center] += 1
+    dominant_zone_for_cell = {
+        cell_id: votes.most_common(1)[0][0] for cell_id, votes in cell_zone_votes.items()
+    }
+    for x_center, words in base.items():
+        keep, evict = [], []
+        for w in words:
+            cell_id = cell_ids.get(id(w))
+            dominant = dominant_zone_for_cell.get(cell_id) if cell_id is not None else None
+            (evict if dominant is not None and dominant != x_center else keep).append(w)
+        base[x_center] = keep
+        for w in evict:
+            base[dominant_zone_for_cell[cell_ids[id(w)]]].append(w)
+
+    claimed_ids = {id(w) for words in base.values() for w in words}
+    zone_for_cell: dict[int, float] = dict(dominant_zone_for_cell)
 
     def _shares_line_to_the_left(candidate: EnsembleWord, accepted: list[EnsembleWord]) -> bool:
         for a in accepted:
@@ -1141,15 +1166,32 @@ def _row_span(row: list[EnsembleWord]) -> tuple[float, float]:
 
 
 def _row_zone_membership(
-    row: list[EnsembleWord], zones: list[tuple[float, float, _HeaderAnchor]]
+    row: list[EnsembleWord],
+    zones: list[tuple[float, float, _HeaderAnchor]],
+    cell_ids: dict[int, int],
 ) -> set[float]:
-    """Which zones' x-centers this row has substantial word overlap with."""
-    return {anchor.x_center for left, right, anchor in zones if _zone_words(row, left, right)}
+    """Which zones' x-centers this row has substantial word overlap with.
+
+    Uses ``_zone_words_by_anchor`` (cell-rescue-aware) rather than the raw
+    ``_zone_words`` x-range test: a wide column whose header label is much
+    narrower than its actual content (e.g. "Account Name" labeling a wide
+    fund-name column) has its zone boundary underestimated from the
+    header-anchor midpoint alone, so a wrapped continuation line's later
+    words can fall just outside the estimated zone and get miscounted
+    against a neighboring column's zone instead. That false extra
+    membership makes ``_column_band_stitch`` treat a genuine single-role
+    fragment as a multi-role anchor and skip merging it. Docling's cell
+    geometry (``cell_ids``) resolves this the same way it already does for
+    the final candidate-building pass.
+    """
+    zone_words = _zone_words_by_anchor(row, zones, cell_ids)
+    return {x_center for x_center, words in zone_words.items() if words}
 
 
 def _column_band_stitch(
     rows: list[list[EnsembleWord]],
     header: tuple[int, list[_HeaderAnchor]] | None,
+    cell_ids: dict[int, int] | None = None,
 ) -> list[list[EnsembleWord]]:
     """OCR-geometry-only fallback: merge a wrapped cell's continuation line
     back into its own row when Docling cell geometry didn't already do
@@ -1208,6 +1250,7 @@ def _column_band_stitch(
     """
     if header is None or len(rows) < 2:
         return rows
+    cell_ids = cell_ids or {}
     header_idx, anchors = header
     zones = _column_zones(anchors, _max_bucket_distance(anchors), rows[header_idx])
     if not zones:
@@ -1219,7 +1262,7 @@ def _column_band_stitch(
     for i, row in enumerate(data_rows):
         if not row:
             continue
-        membership = _row_zone_membership(row, zones)
+        membership = _row_zone_membership(row, zones, cell_ids)
         if not membership:
             continue
         roles = {anchor.base_role for _, _, anchor in zones if anchor.x_center in membership}
@@ -2024,7 +2067,7 @@ def extract_field_candidates(
     # geometry missed (see _column_band_stitch) — a no-op when Docling
     # already stitched everything, so this never changes behavior on
     # clean input.
-    rows = _column_band_stitch(rows, header)
+    rows = _column_band_stitch(rows, header, cell_ids)
     header_idx = header[0] if header is not None else None
 
     candidates: list[FieldCandidate] = []
