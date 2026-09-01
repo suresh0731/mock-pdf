@@ -1132,8 +1132,18 @@ def _zone_words_by_anchor(
     claimed_ids = {id(w) for words in base.values() for w in words}
     zone_for_cell: dict[int, float] = dict(dominant_zone_for_cell)
 
-    def _shares_line_to_the_left(candidate: EnsembleWord, accepted: list[EnsembleWord]) -> bool:
+    def _shares_line_to_the_left(
+        candidate: EnsembleWord, accepted: list[EnsembleWord], own_cell_id: int
+    ) -> bool:
         for a in accepted:
+            if cell_ids.get(id(a)) == own_cell_id:
+                # Same physical Docling/img2table cell as the candidate —
+                # this is the candidate's own line-mate within one wrapped
+                # value (e.g. the first word of a wrap's 2nd/3rd line,
+                # which legitimately starts to the left of that line's
+                # other, already-raw-accepted words), not a different
+                # column's text glued onto this line by OCR.
+                continue
             y_overlap = min(candidate.bbox.y + candidate.bbox.h, a.bbox.y + a.bbox.h) - max(
                 candidate.bbox.y, a.bbox.y
             )
@@ -1149,7 +1159,7 @@ def _zone_words_by_anchor(
         if cell_id is None:
             continue
         x_center = zone_for_cell.get(cell_id)
-        if x_center is None or _shares_line_to_the_left(w, base[x_center]):
+        if x_center is None or _shares_line_to_the_left(w, base[x_center], cell_id):
             continue
         base[x_center].append(w)
         claimed_ids.add(id(w))
@@ -1241,6 +1251,22 @@ def _column_band_stitch(
     independent wrapped cells' stray lines can otherwise sit closer to
     each other than to their own anchors.
 
+    Nearest-by-y-center is itself only a proxy for "which anchor is this
+    the same physical cell as" — one that fails on real scanned/
+    photographed tables whenever a wrapped cell's account-number/amount
+    row happens to be its *second* line rather than its first: that
+    second line's own leading (the gap back up to its own name's first
+    line, one row above) can be wider than the *previous* row's trailing
+    gap down to this fragment, making the fragment nearest, by pure
+    y-distance, to the wrong row entirely. When Docling/img2table's own
+    cell geometry (``cell_ids``) puts the fragment in the exact same
+    physical cell as one bracketing anchor and not the other, that
+    structural signal overrides the y-distance guess (it is never
+    available for a genuinely new, unrelated row, so this can't wrongly
+    absorb one); ties (both sides sharing a cell — never seen in
+    practice, but not a signal either way) fall back to the y-distance
+    result unchanged.
+
     Purely additive: a row with content in zero or more-than-one role is
     never touched, so a document Docling already stitched correctly sees
     no leftover pure-single-role fragments here and this is a no-op.
@@ -1293,10 +1319,22 @@ def _column_band_stitch(
 
             best_side: int | None = None
             best_dist = None
+            cell_matched_side: int | None = None
+            frag_cell_ids = {cid for w in fragment if (cid := cell_ids.get(id(w))) is not None}
             for side_idx in (left_anchor, right_anchor):
                 if side_idx is None:
                     continue
-                anchor_top, anchor_bottom = _row_span(data_rows[side_idx])
+                anchor_row = data_rows[side_idx]
+                anchor_top, anchor_bottom = _row_span(anchor_row)
+                if frag_cell_ids:
+                    anchor_cell_ids = {
+                        cid for w in anchor_row if (cid := cell_ids.get(id(w))) is not None
+                    }
+                    if frag_cell_ids & anchor_cell_ids:
+                        if cell_matched_side is None:
+                            cell_matched_side = side_idx
+                        elif cell_matched_side != side_idx:
+                            cell_matched_side = -1
                 gap = max(0.0, frag_top - anchor_bottom, anchor_top - frag_bottom)
                 if gap > tolerance:
                     continue
@@ -1304,6 +1342,9 @@ def _column_band_stitch(
                 if best_dist is None or dist < best_dist:
                     best_dist = dist
                     best_side = side_idx
+
+            if cell_matched_side is not None and cell_matched_side != -1:
+                best_side = cell_matched_side
 
             if best_side is not None:
                 merged[best_side] = sorted(merged[best_side] + fragment, key=lambda w: w.bbox.x)
@@ -1843,6 +1884,29 @@ def _is_signature_closer_row(tokens: list[str]) -> bool:
     return any(stop in lowered for stop in field_labels.SIGNATURE_CLOSERS)
 
 
+def _row_has_leading_label(row: list[EnsembleWord], group: list[EnsembleWord]) -> bool:
+    """True when some other word earlier on the same row ends with a colon.
+
+    A ``Label: value`` row (e.g. ``Account Name: Fee Agent Penjual``) is
+    never how a signature block's own printed name/org line is laid out
+    — but a name-shaped field *value*, printed right after its label on
+    one row, can otherwise look identical to a signatory name/org line
+    to ``_signature_candidates``/``_signature_org_candidates`` below. It
+    only takes that value sitting in the bottom-of-page band — true on
+    any letter with extra blank space beneath its real signature block —
+    to have it mistaken for one (a real regression: ``Fee Agent
+    Penjual``, an "Account Name:" value, got boxed as a signatory here).
+    Restricted to *this* row rather than the whole page since a label on
+    a different row/line is no signal about this one.
+    """
+    group_ids = {id(w) for w in group}
+    group_left = min(w.bbox.x for w in group)
+    return any(
+        id(w) not in group_ids and w.bbox.x < group_left and w.text.rstrip().endswith(":")
+        for w in row
+    )
+
+
 def _is_org_shaped_row(tokens: list[str]) -> bool:
     if not tokens:
         return False
@@ -1882,6 +1946,8 @@ def _signature_org_candidates(
         for group in _split_row_by_x_gap(row):
             if not (_SIGNATURE_ORG_MIN_WORDS <= len(group) <= _SIGNATURE_ORG_MAX_WORDS):
                 continue
+            if _row_has_leading_label(row, group):
+                continue
             tokens = _row_tokens(group)
             if not _is_org_shaped_row(tokens):
                 continue
@@ -1915,6 +1981,8 @@ def _signature_candidates(
             continue
         for group in _split_row_by_x_gap(row):
             if not (_SIGNATURE_MIN_WORDS <= len(group) <= _SIGNATURE_MAX_WORDS):
+                continue
+            if _row_has_leading_label(row, group):
                 continue
             tokens = _row_tokens(group)
             if not all(_looks_like_name_token(t) for t in tokens):

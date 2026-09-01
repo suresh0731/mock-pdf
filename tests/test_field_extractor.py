@@ -708,6 +708,47 @@ def test_signature_block_close_words_within_a_name_stay_one_row():
     assert _span_text(merged, signatures[0]) == "Wahyu Wijaya"
 
 
+def test_signature_block_skips_label_value_row_shaped_like_a_name():
+    """A ``Label: value`` row (e.g. ``Account Name: Fee Agent Penjual``)
+    sitting in the bottom-of-page band must not be mistaken for a printed
+    signatory name — a real regression: this exact "Account Name:" value
+    got boxed as a signature-ink anchor purely because the surrounding
+    letter has extra blank space below its real signature block."""
+    specs: list[WordSpec] = [
+        ("Invoice", 0, 0, 60, 20),
+        ("Credit", 0, 900, 50, 20),
+        ("to", 55, 900, 20, 20),
+        ("Account", 0, 940, 70, 20),
+        ("Name:", 75, 940, 55, 20),
+        ("Fee", 200, 940, 35, 20),
+        ("Agent", 240, 940, 55, 20),
+        ("Penjual", 300, 940, 65, 20),
+    ]
+    merged, words = _make_words(specs)
+    candidates = extract_field_candidates(merged, words)
+    signatures = [c for c in candidates if c.field_role == "signatory_person"]
+    assert signatures == []
+
+
+def test_signature_org_block_skips_label_value_row_shaped_like_an_org():
+    """Same guard for the org-name path: a ``Label: value`` row whose
+    value happens to contain an org-prefix word (``PT``, ``Life``, ...)
+    must not be mistaken for the letter's own closing company-name line."""
+    specs: list[WordSpec] = [
+        ("Invoice", 0, 0, 60, 20),
+        ("Managed", 0, 900, 65, 20),
+        ("by:", 70, 900, 30, 20),
+        ("PT", 200, 900, 30, 20),
+        ("Sinarmas", 235, 900, 70, 20),
+        ("Life", 310, 900, 40, 20),
+        ("Insurance", 355, 900, 80, 20),
+    ]
+    merged, words = _make_words(specs)
+    candidates = extract_field_candidates(merged, words)
+    orgs = [c for c in candidates if c.field_role == "counterparty_org"]
+    assert orgs == []
+
+
 # --- General guards / dedupe --------------------------------------------
 
 
